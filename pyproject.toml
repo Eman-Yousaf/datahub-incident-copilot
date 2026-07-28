@@ -1,0 +1,18 @@
+[project]
+name = "incident-copilot"
+version = "0.1.0"
+description = "An agent that investigates data-quality incidents by walking DataHub's lineage graph, narrating its reasoning live, and writing findings back to DataHub."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "langchain>=0.3",
+    "langchain-groq>=0.2",
+    "langchain-mcp-adapters>=0.1",
+    "langgraph>=0.2",
+    "python-dotenv>=1.0",
+    "acryl-datahub>=0.15",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
