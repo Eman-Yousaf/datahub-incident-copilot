@@ -1,0 +1,19 @@
+{
+  "name": "incident-copilot",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest"
+    }
+  },
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb"
+  },
+  "postCreateCommand": "pip install uv && uv sync",
+  "forwardPorts": [8080, 9002],
+  "portsAttributes": {
+    "8080": { "label": "DataHub GMS" },
+    "9002": { "label": "DataHub Frontend" }
+  }
+}
