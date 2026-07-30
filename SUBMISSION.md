@@ -10,6 +10,10 @@ else is affected. Incident Copilot does that walk itself, live, on DataHub's rea
 context graph, and writes the answer back so the next person (or agent) doesn't have to
 redo it.
 
+**Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — try it
+directly in a browser, no setup needed. **Repo**:
+https://github.com/Eman-Yousaf/datahub-incident-copilot.
+
 ## Features
 
 - **Investigates data-quality incidents by walking DataHub's real lineage graph live** —

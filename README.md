@@ -16,6 +16,10 @@ different, verifiably different paths through the same code (see
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com/), Track 1 ("Agents
 That Do Real Work").
 
+**Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — pick a
+scenario, watch the agent investigate a real DataHub instance in your browser, no setup
+required. (`webapp.py` — same agent/tool code path as the CLI, streamed over SSE.)
+
 ## Status
 
 Milestones 1-4 complete: DataHub's showcase-ecommerce datapack is seeded with 3 locked
@@ -23,9 +27,9 @@ incident-trigger scenarios, and the ReAct agent runs end-to-end against all 3 �
 the right entity, confirming a root-cause signal via a direct tool call before acting on
 it, computing the correct blast radius, and choosing the correct write-back tier (tag-only
 / tag+note / tag+note+escalated) based on what it actually found. Live narration streams
-as the investigation happens (`cli.py` + `narrate.py`) — a sample transcript is in
-`examples/sample_incident_report.md`. Submission assembly and the demo video are still
-ahead.
+as the investigation happens (`cli.py`/`webapp.py` + `narrate.py`) — a sample transcript
+is in `examples/sample_incident_report.md`. Deployed publicly (see live demo link
+above). The demo video is the one remaining piece.
 
 ## Architecture
 
@@ -38,6 +42,8 @@ ahead.
 - `src/incident_copilot/narrate.py` — live, first-person narration of the agent's actual
   tool calls and reasoning as they happen
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
+- `webapp.py` — FastAPI wrapper streaming the same agent's narration to a browser via
+  SSE, for the public live demo (fixed scenario buttons, not free-form text)
 - `examples/` — sample recorded investigation output
 
 ## Setup
