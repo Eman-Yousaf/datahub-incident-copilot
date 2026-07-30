@@ -33,10 +33,33 @@ from datahub.metadata.schema_classes import (
     SchemaFieldDataTypeClass,
     SchemaMetadataClass,
     StringTypeClass,
+    TagPropertiesClass,
 )
 
 GMS_SERVER = "http://localhost:8080"
 ACTOR = "urn:li:corpuser:b2fd91.bryan@example.com"
+
+# The agent's `add_tags` mutation tool refuses tag URNs that don't already exist as
+# real Tag entities in DataHub -- these back the write-back decision (tag-only vs
+# tag+note vs escalated) described in the plan's milestone 3/5.
+TAGS = [
+    {
+        "urn": "urn:li:tag:incident-flagged",
+        "name": "incident-flagged",
+        "description": (
+            "Applied by Incident Copilot to the entity identified as the root cause "
+            "of an investigated data-quality incident."
+        ),
+    },
+    {
+        "urn": "urn:li:tag:incident-severity-high",
+        "name": "incident-severity-high",
+        "description": (
+            "Applied by Incident Copilot when an incident's blast radius reaches "
+            "multiple downstream consumers (dashboards, BI reports, ML models, etc.)."
+        ),
+    },
+]
 
 OVERLAYS = [
     {
@@ -183,10 +206,27 @@ def apply_overlay(graph: DataHubGraph, overlay: dict) -> None:
     raise RuntimeError(f"[{overlay['name']}] could not stabilize overlay on {urn}")
 
 
+def ensure_tags(graph: DataHubGraph) -> None:
+    for tag in TAGS:
+        if graph.exists(tag["urn"]):
+            print(f"[tags] '{tag['name']}' already exists, skipping")
+            continue
+        graph.emit(
+            MetadataChangeProposalWrapper(
+                entityUrn=tag["urn"],
+                aspect=TagPropertiesClass(
+                    name=tag["name"], description=tag["description"]
+                ),
+            )
+        )
+        print(f"[tags] created '{tag['name']}'")
+
+
 def main() -> None:
     load_datapack()
     wait_for_datapack_to_settle()
     graph = DataHubGraph(DatahubClientConfig(server=GMS_SERVER))
+    ensure_tags(graph)
     for overlay in OVERLAYS:
         apply_overlay(graph, overlay)
 

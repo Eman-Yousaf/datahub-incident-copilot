@@ -11,14 +11,19 @@ That Do Real Work").
 
 ## Status
 
-Early scaffolding — see `TODO` markers in each module. Not yet functional end-to-end.
+Milestones 1-3 complete: DataHub's showcase-ecommerce datapack is seeded with 3 locked
+incident-trigger scenarios, and the ReAct agent runs end-to-end against all 3 — resolving
+the right entity, confirming a root-cause signal via a direct tool call before acting on
+it, computing the correct blast radius, and choosing the correct write-back tier (tag-only
+/ tag+note / tag+note+escalated) based on what it actually found. Live narration polish
+(milestone 4) and demo assets are still ahead.
 
 ## Architecture
 
 - `seed_data.py` — loads DataHub's real showcase-ecommerce datapack into a local
   quickstart instance, and locks the incident trigger points used for the demo
 - `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server
-- `src/incident_copilot/agent.py` — the ReAct agent loop (LangChain + Groq) bound to
+- `src/incident_copilot/agent.py` — the ReAct agent loop (LangGraph + Azure OpenAI) bound to
   DataHub's MCP tools (read + mutation); the agent decides its own investigation path,
   it does not follow a fixed script
 - `src/incident_copilot/narrate.py` — live, first-person narration of the agent's actual
@@ -30,11 +35,13 @@ Early scaffolding — see `TODO` markers in each module. Not yet functional end-
 
 ## Setup
 
-Requires Docker (for DataHub's local quickstart), Python 3.11+, and a Groq API key.
+Requires Docker (for DataHub's local quickstart), Python 3.11+, and an Azure OpenAI
+deployment (any OpenAI-compatible chat model with tool calling works; swap the
+`AzureChatOpenAI` import in `agent.py` if using a different provider).
 
 ```bash
 uv sync
-cp .env.example .env   # fill in GROQ_API_KEY, DATAHUB_GMS_TOKEN if needed
+cp .env.example .env   # fill in AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY, DATAHUB_GMS_TOKEN if needed
 datahub docker quickstart
 python seed_data.py
 python cli.py "our revenue dashboard looks wrong"
