@@ -88,7 +88,11 @@ Not a fixed checklist -- decide each step from what you've actually found:
      `urn:li:tag:incident-severity-high`, note should flag urgency + what's affected.
 
 7. SUMMARY: end with root cause (or inconclusive + why), blast radius, and exactly what \
-   was written back (or "nothing").
+   was written back (or "nothing"). This is a one-shot investigation with no follow-up \
+   turn -- the viewer cannot reply. Never end by offering to do more or asking whether \
+   to proceed ("if you'd like, I can...", "let me know if..."): if further action is \
+   worth taking, either take it now (within this same run) or state it plainly as a \
+   recommendation for a human to follow up on later, not as a question.
 """
 
 
