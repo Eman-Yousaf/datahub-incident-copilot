@@ -30,8 +30,17 @@ def _format_call(call: dict) -> str:
     return f"  -> {call['name']}({args})"
 
 
-def _format_result(content) -> str:
+def _format_result(content, tool_name: str | None = None) -> str:
     text = _text_of(content) if not isinstance(content, str) else content
+    if tool_name == "report_findings":
+        # This is already a short, deliberately-formatted explanation (the
+        # confidence checklist + computed severity) -- truncating it would cut off
+        # exactly the reasoning it exists to show. Indent each line under the
+        # "<-" marker instead of collapsing it to one line.
+        return "\n".join(
+            f"  <- {line}" if i == 0 else f"     {line}"
+            for i, line in enumerate(text.split("\n"))
+        )
     try:
         text = json.dumps(json.loads(text))
     except (json.JSONDecodeError, TypeError):
@@ -63,7 +72,7 @@ def format_new_messages(messages, seen: int) -> tuple[list[tuple[bool, str]], in
             for call in calls:
                 lines.append((False, _format_call(call)))
         elif kind == "ToolMessage":
-            lines.append((False, _format_result(message.content)))
+            lines.append((False, _format_result(message.content, getattr(message, "name", None))))
     return lines, len(messages)
 
 
