@@ -70,3 +70,12 @@ naturally-occurring recent schema-change event to serve as an incident trigger, 
 timestamped field additions are overlaid onto 3 real entities (`seed_data.py`) to create
 3 locked, reproducible incident scenarios of increasing difficulty — the underlying
 lineage graph itself is entirely real DataHub reference data.
+
+## Open-source contribution
+
+Building this surfaced a real, reproducible gap in `mcp-server-datahub` itself: its
+`search` tool's filter docs don't warn that `entity_type = report` isn't valid, or
+that PowerBI/Tableau/Looker report-style artifacts are actually indexed as
+`entity_type = dataset` — the agent hit this directly (an LLM guessed `report`, got
+zero results, burned retries before recovering). Filed as a docs fix upstream:
+[acryldata/mcp-server-datahub#155](https://github.com/acryldata/mcp-server-datahub/pull/155).
