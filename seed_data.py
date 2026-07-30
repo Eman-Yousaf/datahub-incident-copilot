@@ -231,7 +231,30 @@ def fix_opensearch_replicas() -> None:
     `search` fail with "all shards failed" even though the primary shards are fine.
     Setting replicas to 0 (there's nothing to replicate to anyway) fixes this at the
     root instead of just retrying past it. Idempotent; safe to run every time.
+
+    This function fixes *existing* indices, which only covers indices present at the
+    moment it runs. It's not enough on its own: any index created afterward (dated
+    ISM history indices roll over daily; a long-lived deployment like the public demo
+    keeps running and creating new ones) starts fresh at OpenSearch's out-of-the-box
+    default of 1 replica, silently drifting the cluster back to yellow -- confirmed
+    happening on the live demo VM within a couple hours of a clean seed. The index
+    template below closes that gap by making 0-replicas the default for every index
+    *from creation time onward*, not just the ones that exist right now.
     """
+    requests.put(
+        f"{OPENSEARCH_SERVER}/_index_template/no-replicas-default",
+        json={
+            "index_patterns": ["*"],
+            # Low priority: DataHub's own index templates (if they explicitly set
+            # number_of_replicas) still win on conflict. This only fills the gap
+            # where nothing else has an opinion, which is the actual failure mode
+            # observed -- OpenSearch's built-in default of 1 applying by default.
+            "priority": 0,
+            "template": {"settings": {"number_of_replicas": 0}},
+        },
+        timeout=30,
+    ).raise_for_status()
+
     for index in ("_all", ".opendistro-ism-config", ".opendistro-ism-managed-index-history-*"):
         resp = requests.put(
             f"{OPENSEARCH_SERVER}/{index}/_settings",
