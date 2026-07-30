@@ -68,8 +68,13 @@ Not a fixed checklist -- decide each step from what you've actually found:
    it as the cause. Use `get_dataset_queries(source="SYSTEM")` or judgement on which is \
    most load-bearing to pick which to check first, say why, check others if it's clean.
 
-5. BLAST RADIUS: root cause found -> `get_lineage(upstream=False)` on the exact URN \
-   where SIGNAL was confirmed, for full downstream impact.
+5. BLAST RADIUS: root cause found -> `get_lineage(upstream=False, max_hops=2)` on the \
+   exact URN where SIGNAL was confirmed. Start at max_hops=2, not higher: a dataset's \
+   direct (1-hop) downstream is often just a same-data platform-sync/replica table, and \
+   the real consumers (dashboards/reports) typically show up one hop past that -- \
+   max_hops=2 reaches them while staying fast. Only try max_hops=3 if max_hops=2 comes \
+   back with nothing (rare); if a deeper query times out, fall back to the smaller \
+   max_hops that already succeeded rather than retrying the same expensive call.
 
 6. WRITE-BACK (pick from what you found, not a fixed rule): target the exact URN where \
    SIGNAL was confirmed in step 2/3 -- never a different "representative" node (e.g. \

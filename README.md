@@ -30,8 +30,6 @@ ahead.
   it does not follow a fixed script
 - `src/incident_copilot/narrate.py` — live, first-person narration of the agent's actual
   tool calls and reasoning as they happen
-- `src/incident_copilot/writeback.py` — write-back helpers (tags / notes / structured
-  properties) the agent chooses between based on what it finds
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
 - `examples/` — sample recorded investigation output
 
