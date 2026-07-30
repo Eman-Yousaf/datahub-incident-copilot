@@ -6,21 +6,20 @@ import sys
 from dotenv import load_dotenv
 
 from incident_copilot.agent import build_agent
-from incident_copilot.mcp_client import get_datahub_tools
+from incident_copilot.mcp_client import datahub_tools
 from incident_copilot.narrate import LiveNarrationHandler
 
 
 async def run(incident_report: str) -> None:
     load_dotenv()
-    tools = await get_datahub_tools()
-    agent = build_agent(tools)
-
     print(f"Incident Copilot investigating: {incident_report!r}\n")
 
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": incident_report}]},
-        config={"callbacks": [LiveNarrationHandler()], "recursion_limit": 50},
-    )
+    async with datahub_tools() as tools:
+        agent = build_agent(tools)
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": incident_report}]},
+            config={"callbacks": [LiveNarrationHandler()], "recursion_limit": 50},
+        )
 
     print("\n=== Final report ===")
     print(result["messages"][-1].content)

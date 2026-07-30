@@ -6,8 +6,10 @@ DATAHUB_GMS_TOKEN / TOOLS_IS_MUTATION_ENABLED env vars (see .env.example).
 
 import json
 import os
+from contextlib import asynccontextmanager
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 
 
 def build_mcp_client() -> MultiServerMCPClient:
@@ -147,13 +149,26 @@ def _wrap_with_trimming(tool):
 TRIMMED_TOOL_NAMES = {"get_entities", "search"}
 
 
-async def get_datahub_tools():
+@asynccontextmanager
+async def datahub_tools():
+    """Yields DataHub's MCP tools bound to one persistent session for the caller's
+    whole investigation.
+
+    `MultiServerMCPClient.get_tools()` opens a fresh stdio session -- and therefore a
+    fresh `uvx mcp-server-datahub` subprocess -- for every single tool invocation, not
+    just once at startup (confirmed via server logs: 15 separate "Starting MCP server"
+    lines across one investigation). Using `client.session(...)` + `load_mcp_tools`
+    instead holds one session open for the duration of the `async with` block, so a
+    multi-turn ReAct investigation reuses one subprocess instead of restarting it on
+    every tool call.
+    """
     client = build_mcp_client()
-    tools = await client.get_tools()
-    filtered = [tool for tool in tools if tool.name in ALLOWED_TOOL_NAMES]
-    for tool in filtered:
-        if tool.name in CONCISE_DESCRIPTIONS:
-            tool.description = CONCISE_DESCRIPTIONS[tool.name]
-        if tool.name in TRIMMED_TOOL_NAMES:
-            _wrap_with_trimming(tool)
-    return filtered
+    async with client.session("datahub") as session:
+        tools = await load_mcp_tools(session)
+        filtered = [tool for tool in tools if tool.name in ALLOWED_TOOL_NAMES]
+        for tool in filtered:
+            if tool.name in CONCISE_DESCRIPTIONS:
+                tool.description = CONCISE_DESCRIPTIONS[tool.name]
+            if tool.name in TRIMMED_TOOL_NAMES:
+                _wrap_with_trimming(tool)
+        yield filtered

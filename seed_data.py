@@ -25,6 +25,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
+import requests
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
 from datahub.metadata.schema_classes import (
@@ -37,6 +38,7 @@ from datahub.metadata.schema_classes import (
 )
 
 GMS_SERVER = "http://localhost:8080"
+OPENSEARCH_SERVER = "http://localhost:9200"
 ACTOR = "urn:li:corpuser:b2fd91.bryan@example.com"
 
 # The agent's `add_tags` mutation tool refuses tag URNs that don't already exist as
@@ -222,9 +224,34 @@ def ensure_tags(graph: DataHubGraph) -> None:
         print(f"[tags] created '{tag['name']}'")
 
 
+def fix_opensearch_replicas() -> None:
+    """The quickstart's OpenSearch is a single data node, so the default
+    number_of_replicas=1 can never actually be satisfied -- every index sits at
+    `yellow` health with unassigned replica shards, which intermittently makes
+    `search` fail with "all shards failed" even though the primary shards are fine.
+    Setting replicas to 0 (there's nothing to replicate to anyway) fixes this at the
+    root instead of just retrying past it. Idempotent; safe to run every time.
+    """
+    for index in ("_all", ".opendistro-ism-config", ".opendistro-ism-managed-index-history-*"):
+        resp = requests.put(
+            f"{OPENSEARCH_SERVER}/{index}/_settings",
+            json={"index": {"number_of_replicas": 0}},
+            timeout=30,
+        )
+        # The dated ISM history index (created lazily, not always present yet on a
+        # fresh volume) 404s if no index matches the wildcard -- harmless, it's an
+        # internal OpenDistro bookkeeping index unrelated to DataHub's own search.
+        if resp.status_code != 404:
+            resp.raise_for_status()
+    health = requests.get(f"{OPENSEARCH_SERVER}/_cluster/health", timeout=30).json()
+    print(f"[opensearch] cluster health: {health['status']}, "
+          f"{health['unassigned_shards']} unassigned shards")
+
+
 def main() -> None:
     load_datapack()
     wait_for_datapack_to_settle()
+    fix_opensearch_replicas()
     graph = DataHubGraph(DatahubClientConfig(server=GMS_SERVER))
     ensure_tags(graph)
     for overlay in OVERLAYS:
