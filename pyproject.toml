@@ -9,6 +9,7 @@ dependencies = [
     "langchain>=0.3",
     "langchain-openai>=0.2",
     "langchain-mcp-adapters>=0.1",
+    "mcp<2",  # langchain-mcp-adapters 0.3.x isn't compatible with mcp 2.x yet
     "langgraph>=0.2",
     "python-dotenv>=1.0",
     "acryl-datahub>=0.15",
