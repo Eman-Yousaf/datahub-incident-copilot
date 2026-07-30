@@ -41,11 +41,13 @@ def _format_result(content) -> str:
     return f"  <- {text}"
 
 
-def print_new_messages(messages, seen: int) -> int:
-    """Print every message past index `seen`, return the new count. Called once per
-    astream() snapshot so narration appears the moment each step completes, not only
-    after the whole investigation finishes.
+def format_new_messages(messages, seen: int) -> tuple[list[tuple[bool, str]], int]:
+    """Return (blank_line_before, text) pairs for every message past index `seen`, plus
+    the new count. Called once per astream() snapshot so narration is available the
+    moment each step completes, not only after the whole investigation finishes. Shared
+    by cli.py (prints the lines) and webapp.py (streams them to a browser via SSE).
     """
+    lines: list[str] = []
     for message in messages[seen:]:
         kind = message.__class__.__name__
         if kind == "AIMessage":
@@ -54,12 +56,20 @@ def print_new_messages(messages, seen: int) -> int:
             if text and not calls:
                 # No further tool calls queued -- this is the concluding summary
                 # (system prompt step 7), not intermediate reasoning.
-                print("\n=== Final report ===")
-                print(text)
+                lines.append((True, "=== Final report ==="))
+                lines.append((False, text))
             elif text:
-                print(f"\n{text}")
+                lines.append((True, text))
             for call in calls:
-                print(_format_call(call))
+                lines.append((False, _format_call(call)))
         elif kind == "ToolMessage":
-            print(_format_result(message.content))
-    return len(messages)
+            lines.append((False, _format_result(message.content)))
+    return lines, len(messages)
+
+
+def print_new_messages(messages, seen: int) -> int:
+    """Print every message past index `seen`, return the new count."""
+    lines, new_seen = format_new_messages(messages, seen)
+    for blank_before, line in lines:
+        print(f"\n{line}" if blank_before else line)
+    return new_seen
