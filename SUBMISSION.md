@@ -3,6 +3,13 @@
 Source for the DataHub Agent Hackathon submission form (Track 1: "Agents That Do Real
 Work"). Kept in the repo so the text and the code never drift apart.
 
+**The problem**: when a dashboard number looks wrong, the person who notices usually
+isn't the person who can explain why — that takes someone manually tracing lineage
+backward through the warehouse, checking recent schema changes, and figuring out who
+else is affected. Incident Copilot does that walk itself, live, on DataHub's real
+context graph, and writes the answer back so the next person (or agent) doesn't have to
+redo it.
+
 ## Features
 
 - **Investigates data-quality incidents by walking DataHub's real lineage graph live** —

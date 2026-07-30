@@ -1,10 +1,17 @@
 # Incident Copilot
 
-An agent that investigates a data-quality incident by walking DataHub's lineage graph
-live, narrating its reasoning step-by-step ("checking upstream... found a schema change
-on orders.status 6h ago... tracing downstream... found 2 dashboards + 1 ML model at
-risk... tagging them now"), then writes its findings back into DataHub so the next person
-(or agent) inherits the investigation.
+**"Order counts on our dashboards look wrong." Incident Copilot investigates — live, on
+DataHub's real lineage graph — and writes what it finds back into the catalog.**
+
+Point it at a one-line incident report. It searches DataHub for the entity involved,
+narrates its own reasoning as it goes ("checking `order_status_detail` — description
+mentions a new 'Backordered' sub-status, added recently — that's a plausible root
+cause"), decides for itself whether to walk further upstream or stop, computes the real
+downstream blast radius, and tags + annotates the responsible entity so the next person
+(or agent) inherits the investigation instead of re-doing it. Not a fixed 5-step
+pipeline with narration bolted on afterward — three different incident shapes take three
+different, verifiably different paths through the same code (see
+`examples/sample_incident_report.md` for an unedited transcript).
 
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com/), Track 1 ("Agents
 That Do Real Work").
