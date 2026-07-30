@@ -11,12 +11,14 @@ That Do Real Work").
 
 ## Status
 
-Milestones 1-3 complete: DataHub's showcase-ecommerce datapack is seeded with 3 locked
+Milestones 1-4 complete: DataHub's showcase-ecommerce datapack is seeded with 3 locked
 incident-trigger scenarios, and the ReAct agent runs end-to-end against all 3 — resolving
 the right entity, confirming a root-cause signal via a direct tool call before acting on
 it, computing the correct blast radius, and choosing the correct write-back tier (tag-only
-/ tag+note / tag+note+escalated) based on what it actually found. Live narration polish
-(milestone 4) and demo assets are still ahead.
+/ tag+note / tag+note+escalated) based on what it actually found. Live narration streams
+as the investigation happens (`cli.py` + `narrate.py`) — a sample transcript is in
+`examples/sample_incident_report.md`. Submission assembly and the demo video are still
+ahead.
 
 ## Architecture
 

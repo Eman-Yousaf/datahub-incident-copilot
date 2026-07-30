@@ -1,18 +1,65 @@
-"""Live first-person narration of the agent's investigation.
+"""Formats the ReAct agent's message stream into readable, live investigation narration.
 
-Implemented as a LangChain callback handler that prints tool_start/tool_end events as
-they happen, plus the LLM's own between-step commentary -- narration is a side effect of
-the agent's real reasoning trace, not text generated after the fact. Filled in during the
-"live narration layer" milestone, after the core agent loop's decision points are working.
+`cli.py` drives the agent via `astream(..., stream_mode="values")` and calls
+`print_new_messages` on each new state snapshot. Narration is a side effect of the
+agent's real reasoning trace: the LLM's own between-step commentary (its message content,
+which the system prompt asks it to write before/after each tool call) is printed as-is,
+and each tool call/result is rendered as a short, human-readable line instead of a raw
+JSON dump -- nothing here is generated after the fact.
 """
 
-from langchain_core.callbacks.base import BaseCallbackHandler
+import json
+
+_TRUNCATE_AT = 400
 
 
-class LiveNarrationHandler(BaseCallbackHandler):
-    def on_tool_start(self, serialized, input_str, **kwargs):
-        name = serialized.get("name", "tool")
-        print(f"  -> calling {name}({input_str})")
+def _text_of(content) -> str:
+    """AIMessage/ToolMessage content is usually a str, but reasoning-tier models can
+    return a list of content blocks (e.g. [{"type": "text", "text": "..."}]) -- join
+    just the text parts.
+    """
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "") for block in content if isinstance(block, dict)
+        )
+    return content or ""
 
-    def on_tool_end(self, output, **kwargs):
-        print(f"  <- {output}")
+
+def _format_call(call: dict) -> str:
+    args = ", ".join(f"{key}={value!r}" for key, value in call["args"].items())
+    return f"  -> {call['name']}({args})"
+
+
+def _format_result(content) -> str:
+    text = _text_of(content) if not isinstance(content, str) else content
+    try:
+        text = json.dumps(json.loads(text))
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if len(text) > _TRUNCATE_AT:
+        text = text[:_TRUNCATE_AT].rstrip() + f"... [+{len(text) - _TRUNCATE_AT} chars]"
+    return f"  <- {text}"
+
+
+def print_new_messages(messages, seen: int) -> int:
+    """Print every message past index `seen`, return the new count. Called once per
+    astream() snapshot so narration appears the moment each step completes, not only
+    after the whole investigation finishes.
+    """
+    for message in messages[seen:]:
+        kind = message.__class__.__name__
+        if kind == "AIMessage":
+            text = _text_of(message.content).strip()
+            calls = getattr(message, "tool_calls", None) or []
+            if text and not calls:
+                # No further tool calls queued -- this is the concluding summary
+                # (system prompt step 7), not intermediate reasoning.
+                print("\n=== Final report ===")
+                print(text)
+            elif text:
+                print(f"\n{text}")
+            for call in calls:
+                print(_format_call(call))
+        elif kind == "ToolMessage":
+            print(_format_result(message.content))
+    return len(messages)
