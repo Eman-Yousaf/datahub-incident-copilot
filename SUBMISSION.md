@@ -33,6 +33,24 @@ https://github.com/Eman-Yousaf/datahub-incident-copilot.
   appends an incident note, choosing between tag-only / tag+note / tag+note+escalated
   based on the actual computed blast radius — a genuinely conditional decision, verified
   to differ correctly across all 3 test scenarios.
+- **Confidence scoring, shown as a heuristic, not a fabricated statistic.** Before any
+  write-back, the agent reports a checklist of 4 evidence items it actually confirmed via
+  tool calls (recent schema change, symptom match, lineage path, downstream impact).
+  Confidence is `checked/total`, bucketed to low/medium/high — never a manufactured
+  precise percentage — and the checklist is shown in full so a judge can see exactly why.
+- **Severity is a deterministic function, not a free LLM judgment call.**
+  `severity = f(confidence, affected datasets, affected dashboards, business
+  criticality)` is computed in plain Python (`decision.py`), the same function every
+  time — inspectable and reproducible, not something the model decides fresh each run.
+- **A real "do not act" path, enforced in code.** If confidence comes back low (or the
+  investigation is inconclusive), the write-back tools are *blocked at the code level* —
+  not just discouraged by a prompt — and the agent is routed to recommend human review
+  instead of guessing. Verified live: a run that hit a real backend search failure
+  correctly produced 0/4 evidence, LOW confidence, and made zero write-back attempts.
+- **Write-back is verified, not just trusted.** Every successful `add_tags`/
+  `update_description` call automatically re-fetches the entity from DataHub and shows
+  the result — the tag or note is visibly present in the response, not just a bare
+  `success: true` a judge has to take on faith.
 - **Anti-hallucination guardrails**: never fabricates a URN, never claims a node "changed
   recently" without a tool call confirming it on that exact URN, and reports "inconclusive"
   rather than guessing when evidence doesn't support a conclusion.
@@ -50,10 +68,13 @@ instance. The agent:
 3. If nothing is found, walks upstream lineage (capped at 3 hops) and repeats, reasoning
    about which branch to prioritize when a node has multiple parents.
 4. Once a root cause is confirmed, computes downstream blast radius via lineage.
-5. Writes back to DataHub: a tag always, a descriptive note if the blast radius is
-   non-trivial, and an escalated severity tag if it spans multiple platforms or many
-   consumers.
-6. Prints a structured final summary (root cause, blast radius, what was written back).
+5. Reports its findings through a required checkpoint tool: an evidence checklist that
+   becomes a confidence level, which becomes a computed severity tier — code, not the
+   model, decides what it's authorized to do next.
+6. Writes back to DataHub only what that tier authorizes (or nothing, if confidence was
+   too low), then verifies the mutation actually landed by re-reading the entity.
+7. Prints a structured final summary (root cause, confidence/severity, blast radius,
+   what was written back).
 
 ## Technologies
 

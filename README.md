@@ -13,6 +13,15 @@ pipeline with narration bolted on afterward — three different incident shapes 
 different, verifiably different paths through the same code (see
 `examples/sample_incident_report.md` for an unedited transcript).
 
+Before any write-back, the agent has to clear a code-enforced checkpoint, not just a
+prompt suggestion: it reports which of 4 evidence items it actually confirmed via tool
+calls, a confidence level (low/medium/high — a heuristic bucket, never a fabricated
+precise percentage) and severity tier are computed from that in plain Python
+(`decision.py`), and low confidence blocks `add_tags`/`update_description` outright,
+routing to a human-review recommendation instead. Every successful mutation re-reads
+the entity from DataHub afterward, so the trace shows the tag/note actually landed
+instead of asking you to trust a bare `success: true`.
+
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com/), Track 1 ("Agents
 That Do Real Work").
 
@@ -35,10 +44,14 @@ above). The demo video is the one remaining piece.
 
 - `seed_data.py` — loads DataHub's real showcase-ecommerce datapack into a local
   quickstart instance, and locks the incident trigger points used for the demo
-- `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server
+- `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server; also gates
+  the mutation tools behind `decision.py`'s computed severity and auto-verifies
+  successful write-backs by re-reading the entity
 - `src/incident_copilot/agent.py` — the ReAct agent loop (LangGraph + Azure OpenAI) bound to
   DataHub's MCP tools (read + mutation); the agent decides its own investigation path,
   it does not follow a fixed script
+- `src/incident_copilot/decision.py` — the evidence checklist → confidence → severity
+  computation, and the `report_findings` tool the agent must call before write-back
 - `src/incident_copilot/narrate.py` — live, first-person narration of the agent's actual
   tool calls and reasoning as they happen
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
