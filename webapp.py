@@ -4,7 +4,7 @@ streams its live narration to a browser via Server-Sent Events.
 Scope is intentionally narrow -- fixed scenario buttons, not free-form text input --
 to bound both cost (each run is a real multi-turn Azure OpenAI conversation against a
 live DataHub instance with mutation tools enabled) and abuse surface, since this is
-meant to sit behind a public URL during hackathon judging. Reuses the exact same
+meant to sit behind a public URL for live demos. Reuses the exact same
 agent/tool code path as cli.py; only the transport (SSE instead of stdout) differs.
 """
 

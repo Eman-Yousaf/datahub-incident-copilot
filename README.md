@@ -22,9 +22,6 @@ routing to a human-review recommendation instead. Every successful mutation re-r
 the entity from DataHub afterward, so the trace shows the tag/note actually landed
 instead of asking you to trust a bare `success: true`.
 
-Built for the [DataHub Agent Hackathon](https://datahub.devpost.com/), Track 1 ("Agents
-That Do Real Work").
-
 **Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — pick a
 scenario, watch the agent investigate a real DataHub instance in your browser, no setup
 required. (`webapp.py` — same agent/tool code path as the CLI, streamed over SSE.)
