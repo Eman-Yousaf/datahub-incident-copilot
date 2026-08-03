@@ -80,7 +80,8 @@ CONCISE_DESCRIPTIONS = {
         "container, domain, tag, glossaryTerm, document (all lowercase, no others -- "
         "'report' is NOT a valid type; PowerBI/Tableau/Looker reports are usually typed "
         "'dataset' here). If unsure of the type, omit the filter and search by keyword "
-        "alone. Returns top matches with URNs -- pass promising ones to get_entities."
+        "alone. Returns top matches with URNs -- pass promising ones to get_entities. "
+        "Results already come back in relevance order; do not pass sort_by/sort_order."
     ),
     "get_entities": (
         "Get full details (schema, properties, tags) for one or more entity URNs. Pass "
@@ -165,6 +166,35 @@ def _wrap_with_trimming(tool):
 
 
 TRIMMED_TOOL_NAMES = {"get_entities", "search"}
+
+
+def _wrap_search_sort_compat(tool):
+    """Drop `sort_by`/`sort_order` from `search` calls.
+
+    A recent `mcp-server-datahub` exposes these parameters and the model naturally
+    fills in `sort_by="relevance"`, which DataHub OSS rejects outright:
+
+        query_shard_exception: No mapping found for [relevance] in order to sort on
+        -> search_phase_execution_exception: all shards failed  (HTTP 400)
+
+    There is no `relevance` field in `datasetindex_v2` to sort on -- relevance is the
+    default ranking, not a sortable field -- so every search carrying that argument
+    fails, and the agent reads a 400 as "the search backend is down" and correctly
+    refuses to act. Left alone it silently disables the entire investigation path.
+
+    Stripped in code rather than discouraged in the prompt, for the same reason the
+    severity gate is enforced in code: an instruction the model merely *usually*
+    follows isn't a fix when the failure mode is this total.
+    """
+    original_coroutine = tool.coroutine
+
+    async def compat_coroutine(*args, **kwargs):
+        kwargs.pop("sort_by", None)
+        kwargs.pop("sort_order", None)
+        return await original_coroutine(*args, **kwargs)
+
+    tool.coroutine = compat_coroutine
+    return tool
 
 
 def _wrap_with_provenance(tool, state: dict):
@@ -277,6 +307,8 @@ async def datahub_tools(incident_report: str = ""):
                 tool.description = CONCISE_DESCRIPTIONS[tool.name]
             if tool.name in TRIMMED_TOOL_NAMES:
                 _wrap_with_trimming(tool)
+            if tool.name == "search":
+                _wrap_search_sort_compat(tool)
 
         get_entities_tool = by_name.get("get_entities")
         for tool in filtered:
