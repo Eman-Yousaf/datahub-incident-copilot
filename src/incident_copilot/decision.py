@@ -16,12 +16,28 @@ a "no_action" severity -- low confidence, or an inconclusive investigation -- ma
 add_tags/update_description refuse to run, regardless of what the agent tries. That's
 the enforced "do not act" path: uncertainty routes to a human-review recommendation
 instead of an autonomous write, and that routing can't be talked around by the model.
+
+The gate covers *acting on the data* -- tagging and annotating catalog entities. It
+deliberately does not cover *recording what was learned*: `report_findings` always
+builds an Investigation Card (see memory.py) and that card is always written back,
+refusals included. A run that refuses to act still produces the most useful artifact
+it can -- an explicit record of what was checked, what was missing, and exactly what
+evidence would make action safe next time -- and every field on it is derived here in
+Python from the agent's evidence, never authored freehand by the model.
 """
 
+from datetime import datetime, timezone
 from typing import Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+from .memory import (
+    REQUIRED_BEFORE_RETRY,
+    EvidenceItem,
+    InvestigationCard,
+    new_incident_id,
+)
 
 SeverityTier = Literal["no_action", "tag_only", "tag_and_note", "tag_note_escalated"]
 
@@ -114,6 +130,35 @@ class Findings(BaseModel):
         "have no specific signal either way -- don't guess 'high' without a reason "
         "you can point to.",
     )
+    hypotheses_tested: list[str] = Field(
+        default_factory=list,
+        description="Short descriptions of the explanations you actually investigated "
+        "this run, e.g. 'recent schema change on order_details introduced a new status "
+        "value'. One line each.",
+    )
+    hypotheses_rejected: list[str] = Field(
+        default_factory=list,
+        description="Of those, the ones a tool call actually ruled OUT, with the reason, "
+        "e.g. 'upstream promotions table changed -- rejected, no field modified in the "
+        "incident window'. These are recorded so a future investigation does not waste "
+        "calls re-testing them; only list a hypothesis here if you genuinely disproved "
+        "it, not if you merely didn't get to it.",
+    )
+    inherited_evidence: list[str] = Field(
+        default_factory=list,
+        description="Evidence check names (exactly as spelled in this schema, e.g. "
+        "'evidence_lineage_confirms_path') that you carried forward from a prior "
+        "Investigation Card returned by recall_prior_investigations, rather than "
+        "re-confirming with your own tool call this run. Leave empty if you confirmed "
+        "everything yourself. Be honest here -- it is recorded as provenance on the "
+        "card, and inherited evidence is not treated as weaker, only as traceable.",
+    )
+    continues_incident_id: str | None = Field(
+        default=None,
+        description="If recall_prior_investigations returned a card you are continuing, "
+        "its incident_id (e.g. 'INC-20260803-141522'). None if this is a fresh "
+        "investigation with no usable prior card.",
+    )
 
 
 def compute_confidence(findings: Findings) -> tuple[str, int, int]:
@@ -152,6 +197,84 @@ def compute_severity(confidence_level: str, findings: Findings) -> SeverityTier:
     return "tag_and_note"
 
 
+def _refusal_reason(findings: Findings, confidence_level: str, checked: int, total: int) -> str:
+    """Why the policy withheld action, stated in terms of the checks themselves.
+    Derived, not written by the model -- so the reason on the card always matches the
+    arithmetic that actually produced the refusal.
+    """
+    if findings.outcome == "inconclusive":
+        return (
+            "No root cause was established, so there is nothing to act on. "
+            f"{findings.root_cause_summary}".strip()
+        )
+    return (
+        f"Only {checked} of {total} evidence checks were confirmed, which is "
+        f"{confidence_level.upper()} confidence. Autonomous write-back requires at "
+        "least medium confidence, so the write-back tools were blocked and this is "
+        "routed to human review instead."
+    )
+
+
+def build_card(state: dict) -> InvestigationCard:
+    """Assemble the durable Investigation Card from what actually happened this run.
+
+    Every field is derived: evidence from the agent's checklist, confidence/severity
+    from the functions above, the refusal reason from the arithmetic, the required-
+    before-retry list from exactly which checks came back false, provenance from the
+    tools that really got called, and actions_taken from mutations that really
+    succeeded (recorded by the gate in mcp_client.py, not claimed by the model).
+    """
+    findings: Findings = state["findings"]
+    confidence_level: str = state["confidence_level"]
+    checked: int = state["checks_confirmed"]
+    total: int = state["checks_total"]
+    severity: SeverityTier = state["severity"]
+    inherited = set(findings.inherited_evidence or [])
+
+    decision = "REFUSAL" if severity == "no_action" else "ACTION"
+    evidence = [
+        EvidenceItem(
+            key=name,
+            label=label,
+            confirmed=getattr(findings, name),
+            inherited=name in inherited and getattr(findings, name),
+        )
+        for name, label in _EVIDENCE_LABELS
+    ]
+
+    return InvestigationCard(
+        incident_id=state.setdefault("incident_id", new_incident_id()),
+        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        trigger=state.get("trigger", ""),
+        subject_urn=state.get("subject_urn"),
+        root_cause_urn=findings.root_cause_urn,
+        root_cause_summary=findings.root_cause_summary,
+        outcome=findings.outcome,
+        evidence=evidence,
+        hypotheses_tested=findings.hypotheses_tested,
+        hypotheses_rejected=findings.hypotheses_rejected,
+        confidence_level=confidence_level,
+        checks_confirmed=checked,
+        checks_total=total,
+        severity=severity,
+        decision=decision,
+        refusal_reason=(
+            _refusal_reason(findings, confidence_level, checked, total)
+            if decision == "REFUSAL"
+            else ""
+        ),
+        required_before_retry=(
+            [REQUIRED_BEFORE_RETRY[name] for name, _ in _EVIDENCE_LABELS if not getattr(findings, name)]
+            if decision == "REFUSAL"
+            else []
+        ),
+        provenance=sorted(state.get("tools_used", set())),
+        actions_taken=list(state.get("actions_taken", [])),
+        continues_incident_id=findings.continues_incident_id,
+        reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
+    )
+
+
 def build_report_findings_tool(state: dict):
     """Returns the report_findings tool, bound to `state` (a plain dict shared with
     mcp_client.py's mutation-tool gate). Calling this tool is how the agent's
@@ -171,6 +294,12 @@ def build_report_findings_tool(state: dict):
         severity = compute_severity(confidence_level, findings)
         state["severity"] = severity
         state["root_cause_urn"] = findings.root_cause_urn
+        # Everything build_card needs, captured at the moment the policy ran rather
+        # than re-asked of the model later, when it may have drifted.
+        state["findings"] = findings
+        state["confidence_level"] = confidence_level
+        state["checks_confirmed"] = checked
+        state["checks_total"] = total
 
         checklist = "\n".join(
             f"{'✓' if getattr(findings, name) else '✗'} {label}"
@@ -185,7 +314,9 @@ def build_report_findings_tool(state: dict):
             f"affected_dashboards={findings.affected_dashboard_count}, "
             f"business_criticality={findings.business_criticality}) "
             f"= {severity}\n"
-            f"Authorized action: {SEVERITY_INSTRUCTIONS[severity]}"
+            f"Authorized action: {SEVERITY_INSTRUCTIONS[severity]}\n"
+            "Then call write_investigation_card (always -- it is never blocked, and a "
+            "refusal is exactly the case where recording what you learned matters most)."
         )
 
     return report_findings

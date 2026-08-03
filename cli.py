@@ -16,7 +16,7 @@ async def run(incident_report: str) -> None:
 
     seen = 0
     final_messages = None
-    async with datahub_tools() as tools:
+    async with datahub_tools(incident_report) as tools:
         agent = build_agent(tools)
         async for state in agent.astream(
             {"messages": [{"role": "user", "content": incident_report}]},

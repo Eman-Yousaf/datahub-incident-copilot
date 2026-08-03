@@ -11,7 +11,10 @@ from contextlib import asynccontextmanager
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-from .decision import SEVERITY_INSTRUCTIONS, build_report_findings_tool
+from .decision import SEVERITY_INSTRUCTIONS, build_card, build_report_findings_tool
+from .mcp_util import extract_text as _extract_text
+from .mcp_util import with_text as _with_text
+from .memory import build_recall_tool, build_write_card_tool
 
 
 def build_mcp_client() -> MultiServerMCPClient:
@@ -50,6 +53,18 @@ ALLOWED_TOOL_NAMES = {
     "get_dataset_queries",
     "add_tags",
     "update_description",
+}
+
+# Loaded from the MCP server but NOT bound to the agent. These three power the
+# persistent-memory layer (memory.py) and are driven from Python instead: recall
+# searches/greps stored Investigation Cards, and the card write-back saves one. Keeping
+# them out of the model's tool list means which prior investigation gets inherited, and
+# what the stored card says, are decided by code -- and it keeps three more multi-KB
+# tool schemas out of every turn's token budget.
+INTERNAL_TOOL_NAMES = {
+    "search_documents",
+    "grep_documents",
+    "save_document",
 }
 
 # The MCP server's own docstrings for these tools are each multi-KB (full worked
@@ -131,43 +146,6 @@ def _trim_verbose_fields(obj):
     return obj
 
 
-def _extract_text(content) -> str | None:
-    """MCP tool results are NOT always a bare string -- the adapter often returns a
-    list of content blocks instead, e.g. [{"type": "text", "text": "...", "id": \
-    "..."}]. Every place downstream that assumed `isinstance(content, str)` (trimming,
-    write-back verification) was silently no-op-ing on this shape without erroring,
-    since the check just failed quietly. This pulls the actual text out of either
-    shape so those checks work for real.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ]
-        return "".join(parts) if parts else None
-    return None
-
-
-def _with_text(content, new_text: str):
-    """Rebuild `content` in whatever shape it started in (str, or list-of-blocks),
-    carrying `new_text` instead of the original text.
-    """
-    if isinstance(content, str):
-        return new_text
-    if isinstance(content, list):
-        rebuilt = [
-            block
-            for block in content
-            if not (isinstance(block, dict) and block.get("type") == "text")
-        ]
-        rebuilt.insert(0, {"type": "text", "text": new_text})
-        return rebuilt
-    return content
-
-
 def _wrap_with_trimming(tool):
     original_coroutine = tool.coroutine
 
@@ -187,6 +165,20 @@ def _wrap_with_trimming(tool):
 
 
 TRIMMED_TOOL_NAMES = {"get_entities", "search"}
+
+
+def _wrap_with_provenance(tool, state: dict):
+    """Record that this tool really ran, so the Investigation Card's provenance list
+    reflects observed calls rather than the model's recollection of what it called.
+    """
+    original_coroutine = tool.coroutine
+
+    async def tracked_coroutine(*args, **kwargs):
+        state.setdefault("tools_used", set()).add(tool.name)
+        return await original_coroutine(*args, **kwargs)
+
+    tool.coroutine = tracked_coroutine
+    return tool
 
 # Which severity tiers (see decision.py) each mutation tool is authorized to run
 # under. add_tags also gets a finer per-call check below, since the severity-high tag
@@ -229,6 +221,16 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
         entity_urns = kwargs.get("entity_urns") or (
             [kwargs["entity_urn"]] if "entity_urn" in kwargs else []
         )
+
+        # Recorded from the call that actually got past the gate and ran, so the
+        # Investigation Card's "actions taken" section reports what really happened to
+        # the catalog rather than what the model says it did.
+        detail = ", ".join(kwargs.get("tag_urns") or []) if mcp_tool.name == "add_tags" else ""
+        state.setdefault("actions_taken", []).append(
+            f"{mcp_tool.name}({detail}) on {', '.join(entity_urns) or 'unknown entity'}"
+            if detail
+            else f"{mcp_tool.name} on {', '.join(entity_urns) or 'unknown entity'}"
+        )
         if entity_urns and get_entities_tool is not None and text is not None:
             try:
                 after = await get_entities_tool.coroutine(urns=entity_urns)
@@ -247,7 +249,7 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
 
 
 @asynccontextmanager
-async def datahub_tools():
+async def datahub_tools(incident_report: str = ""):
     """Yields DataHub's MCP tools bound to one persistent session for the caller's
     whole investigation.
 
@@ -262,18 +264,53 @@ async def datahub_tools():
     client = build_mcp_client()
     async with client.session("datahub") as session:
         tools = await load_mcp_tools(session)
+        by_name = {tool.name: tool for tool in tools}
         filtered = [tool for tool in tools if tool.name in ALLOWED_TOOL_NAMES]
+
+        # One dict threaded through every wrapper below. It is the only channel by
+        # which the policy layer, the mutation gate, and the memory layer share state
+        # -- and nothing the model emits can write to it directly.
+        decision_state: dict = {"trigger": incident_report}
+
         for tool in filtered:
             if tool.name in CONCISE_DESCRIPTIONS:
                 tool.description = CONCISE_DESCRIPTIONS[tool.name]
             if tool.name in TRIMMED_TOOL_NAMES:
                 _wrap_with_trimming(tool)
 
-        get_entities_tool = next((t for t in filtered if t.name == "get_entities"), None)
-        decision_state: dict = {}
+        get_entities_tool = by_name.get("get_entities")
         for tool in filtered:
             if tool.name in _MUTATION_ALLOWED_SEVERITIES:
                 _gate_mutation_tool(tool, decision_state, get_entities_tool)
+            _wrap_with_provenance(tool, decision_state)
+
         filtered.append(build_report_findings_tool(decision_state))
+
+        # The persistent-memory layer. These three MCP tools stay internal (see
+        # INTERNAL_TOOL_NAMES) and are called from Python, so the agent gets exactly
+        # two memory tools: one to read prior investigations, one to record this one.
+        missing = INTERNAL_TOOL_NAMES - by_name.keys()
+        if missing:
+            # Only possible against an older DataHub than the documents tools require
+            # (oss >= 1.4.0) or with save_document disabled server-side. Degrade to the
+            # previous single-shot behaviour rather than failing the whole run.
+            print(
+                f"[incident-copilot] persistent memory disabled -- MCP server did not "
+                f"expose: {', '.join(sorted(missing))}"
+            )
+        else:
+            filtered.append(
+                build_recall_tool(
+                    decision_state, by_name["search_documents"], by_name["grep_documents"]
+                )
+            )
+            filtered.append(
+                build_write_card_tool(
+                    decision_state,
+                    by_name["save_document"],
+                    by_name["grep_documents"],
+                    build_card,
+                )
+            )
 
         yield filtered
