@@ -3,104 +3,146 @@
 Source for the DataHub Agent Hackathon submission form (Track 1: "Agents That Do Real
 Work"). Kept in the repo so the text and the code never drift apart.
 
-**The problem**: when a dashboard number looks wrong, the person who notices usually
-isn't the person who can explain why — that takes someone manually tracing lineage
-backward through the warehouse, checking recent schema changes, and figuring out who
-else is affected. Incident Copilot does that walk itself, live, on DataHub's real
-context graph, and writes the answer back so the next person (or agent) doesn't have to
-redo it.
+**One sentence**: Incident Copilot is a trust-aware incident investigation agent that
+gathers evidence, refuses unsafe actions through deterministic policy, writes structured
+operational knowledge back into DataHub, and enables future investigations to continue
+instead of starting from scratch.
 
 **Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — try it
 directly in a browser, no setup needed. **Repo**:
 https://github.com/Eman-Yousaf/datahub-incident-copilot.
 
+## The problem
+
+Two problems, actually, and the second is the one nobody solves.
+
+When a dashboard number looks wrong, the person who notices isn't the person who can
+explain why — that takes someone tracing lineage backward, checking recent schema
+changes, and working out who else is affected. An agent can do that walk.
+
+But an agent that does the walk still leaves you with the harder problem: **the
+investigation evaporates.** Next week the same symptom resurfaces and the next run — human
+or agent — starts from zero. Worse, when the evidence is thin, an autonomous agent either
+guesses and writes something wrong into your catalog, or gives up and produces nothing at
+all. Neither outcome is operational knowledge.
+
+Incident Copilot makes uncertainty productive: it refuses to act on thin evidence *by
+policy enforced in code*, and it records the refusal as a structured, durable artifact
+inside DataHub that the next investigation reads and continues from.
+
 ## Features
 
-- **Investigates data-quality incidents by walking DataHub's real lineage graph live** —
-  not a canned report generator. Given a plain-English incident report (e.g. "order count
-  numbers on our dashboards look wrong"), the agent resolves the right entity, inspects
-  its schema for a recent, symptom-matching change, and walks lineage upstream/downstream
-  as needed.
-- **A real agent loop, not a fixed pipeline.** Built as a LangGraph ReAct agent bound
-  directly to DataHub's MCP tools — the LLM decides at each step whether to keep walking
-  lineage, which of several upstream parents to prioritize (using real signals: recency,
-  query frequency), and when to stop. Validated across 3 distinct trigger scenarios with
-  divergent tool-call traces, not a single scripted sequence with narration bolted on.
-- **Live, first-person narration.** Prints the agent's own reasoning and each tool call/
-  result as they happen, so a human watches the investigation unfold instead of reading a
-  report after the fact.
-- **Writes findings back into DataHub**, not just to a console: tags affected entities and
-  appends an incident note, choosing between tag-only / tag+note / tag+note+escalated
-  based on the actual computed blast radius — a genuinely conditional decision, verified
-  to differ correctly across all 3 test scenarios.
-- **Confidence scoring, shown as a heuristic, not a fabricated statistic.** Before any
-  write-back, the agent reports a checklist of 4 evidence items it actually confirmed via
-  tool calls (recent schema change, symptom match, lineage path, downstream impact).
-  Confidence is `checked/total`, bucketed to low/medium/high — never a manufactured
-  precise percentage — and the checklist is shown in full so a judge can see exactly why.
-- **Severity is a deterministic function, not a free LLM judgment call.**
-  `severity = f(confidence, affected datasets, affected dashboards, business
-  criticality)` is computed in plain Python (`decision.py`), the same function every
-  time — inspectable and reproducible, not something the model decides fresh each run.
-- **A real "do not act" path, enforced in code.** If confidence comes back low (or the
-  investigation is inconclusive), the write-back tools are *blocked at the code level* —
-  not just discouraged by a prompt — and the agent is routed to recommend human review
-  instead of guessing. Verified live: a run that hit a real backend search failure
-  correctly produced 0/4 evidence, LOW confidence, and made zero write-back attempts.
-- **Write-back is verified, not just trusted.** Every successful `add_tags`/
-  `update_description` call automatically re-fetches the entity from DataHub and shows
-  the result — the tag or note is visibly present in the response, not just a bare
-  `success: true` a judge has to take on faith.
-- **Anti-hallucination guardrails**: never fabricates a URN, never claims a node "changed
-  recently" without a tool call confirming it on that exact URN, and reports "inconclusive"
-  rather than guessing when evidence doesn't support a conclusion.
+- **Persistent investigation memory, stored in DataHub itself.** Every run — including a
+  refusal — writes an **Investigation Card** as a `document` entity linked to the assets it
+  concerned: incident id, trigger, evidence confirmed, evidence missing, hypotheses tested,
+  hypotheses rejected, confidence, severity, the decision (ACTION or REFUSAL), the exact
+  refusal reason, what evidence would make action safe, and the provenance of every
+  conclusion. Not chat memory — durable catalog metadata a human sees on the dataset page.
+- **Replay avoidance: the next investigation continues, it doesn't restart.** Before
+  anything else the agent calls `recall_prior_investigations`, inherits the checks already
+  confirmed, skips the hypotheses already disproven, and spends its tool calls only on
+  what's missing or may have changed. Verified live: a second run explicitly continued a
+  stored card rather than re-deriving it.
+- **A refusal is a first-class outcome, not a failure.** The severity gate blocks *acting
+  on the data*; it never blocks *recording what was learned*. The lower the confidence, the
+  more valuable the card — it's what lets the next run skip straight to the missing evidence
+  instead of rediscovering the same dead end.
+- **The LLM never decides whether writes are allowed. Python does.** Confidence is
+  `confirmed / total` on a 4-item evidence checklist. Severity is
+  `f(confidence, affected datasets, affected dashboards, business criticality)` — the same
+  plain function every run, in `decision.py`. Low confidence or an inconclusive outcome
+  makes `add_tags`/`update_description` refuse to run at the code level, and routes to human
+  review. Not a prompt instruction the model usually follows: a control it cannot reach.
+- **Inherited evidence is verified, not taken on faith.** A run that claims it carried a
+  check forward from a prior card has that claim checked against the cards recall actually
+  returned. An unbacked claim resets the check to unconfirmed — lowering confidence, and
+  potentially pulling severity down to `no_action`. The rejection is recorded on the card.
+  This closed a real hole found during validation, where a run claimed to inherit a check
+  from prior cards that had confirmed nothing.
+- **Cards are built by code, not authored by the model.** The agent supplies evidence;
+  confidence, severity, the refusal reason and the required-before-retry list are all
+  derived. Identical evidence always produces an identical card — a judge can reconstruct
+  why any conclusion was reached without trusting the narrative.
+- **Recall is deterministic too.** Finding prior cards is Python: list documents, grep for
+  the card marker, decode the exact embedded JSON payload, score relevance arithmetically
+  against the incident text. The model never gets to decide which past investigation it
+  "feels" related to, so the same incident always inherits the same evidence.
+- **Investigates by walking DataHub's real lineage graph live** — not a canned report
+  generator. Given a plain-English report, the agent resolves the right entity, inspects
+  its schema for a recent symptom-matching change, and walks lineage up/down as needed,
+  deciding its own path. Validated across 3 distinct scenarios with divergent tool traces.
+- **Write-back is verified, not trusted.** Every successful mutation re-fetches the entity
+  and shows the tag or note present, rather than a bare `success: true`. The card write-back
+  re-reads itself from DataHub the same way.
+- **Live, first-person narration**, so a human watches the investigation unfold rather than
+  reading a report afterward.
+- **Anti-hallucination guardrails**: never fabricates a URN, never claims something
+  "changed recently" without a tool call confirming it on that exact URN, and reports
+  inconclusive rather than guessing.
 
 ## Functionality
 
-Run `python cli.py "our revenue dashboard looks wrong"` against a running DataHub
-instance. The agent:
+Run `python cli.py "our revenue dashboard looks wrong"` against a running DataHub instance.
+The agent:
 
-1. Searches DataHub for the entity the report is about, preferring the warehouse/
-   transform layer (dbt/SQL) over thin BI-tool passthroughs (Looker/Tableau/PowerBI)
-   as its investigation anchor.
-2. Inspects that entity's schema fields for one that changed more recently than its
-   siblings and plausibly explains the symptom.
-3. If nothing is found, walks upstream lineage (capped at 3 hops) and repeats, reasoning
-   about which branch to prioritize when a node has multiple parents.
-4. Once a root cause is confirmed, computes downstream blast radius via lineage.
-5. Reports its findings through a required checkpoint tool: an evidence checklist that
-   becomes a confidence level, which becomes a computed severity tier — code, not the
-   model, decides what it's authorized to do next.
-6. Writes back to DataHub only what that tier authorizes (or nothing, if confidence was
-   too low), then verifies the mutation actually landed by re-reading the entity.
-7. Prints a structured final summary (root cause, confidence/severity, blast radius,
-   what was written back).
+1. **Recalls prior investigations** of this incident from DataHub, and inherits what they
+   established: confirmed evidence to reuse, hypotheses already disproven, and the specific
+   evidence a previous run said was still missing.
+2. Searches DataHub for the entity the report is about, preferring the warehouse/transform
+   layer (dbt/SQL) over thin BI-tool passthroughs as its anchor.
+3. Inspects that entity's schema for a field that changed more recently than its siblings
+   and plausibly explains the symptom — skipping checks a recalled card already confirmed.
+4. If nothing is found, walks upstream lineage (capped at 3 hops), reasoning about which
+   branch to prioritize when a node has several parents.
+5. Once a root cause is confirmed, computes downstream blast radius via lineage.
+6. Reports findings through a required checkpoint: an evidence checklist becomes a
+   confidence level becomes a computed severity tier. Inheritance claims are validated here,
+   before the arithmetic — code, not the model, decides what happens next.
+7. Writes back only what that tier authorizes — **or refuses outright** — then verifies any
+   mutation actually landed by re-reading the entity.
+8. **Writes the Investigation Card back into DataHub**, always, act or refuse, linked to the
+   affected assets and to the prior cards it continued.
+9. Prints a structured summary: root cause, confidence/severity, blast radius, what was
+   written back, and which checks it was able to skip because a previous run had done them.
 
 ## Technologies
 
-- **DataHub OSS** (`v1.5.0.6`, Docker quickstart) as the metadata/lineage source of truth
-- **DataHub MCP Server** (`mcp-server-datahub`) exposing DataHub's search, lineage, schema,
-  and mutation (tag/description write-back) tools over MCP
-- **LangGraph** (`create_react_agent`) for the ReAct agent loop, bound directly to the MCP
-  tools via `langchain-mcp-adapters`
+Implementation details — the substance of the project is the trust and memory layer built
+on top of these.
+
+- **DataHub OSS** (`v1.5.0.6`, Docker quickstart) as the metadata/lineage source of truth,
+  *and* as the durable store for investigation knowledge (`document` entities)
+- **DataHub MCP Server** (`mcp-server-datahub`) exposing search, lineage, schema, document
+  read/write, and mutation tools over MCP
+- **LangGraph** (`create_react_agent`) for the agent loop, bound to the MCP tools via
+  `langchain-mcp-adapters`
 - **Azure OpenAI** (`gpt-5-nano`) as the LLM
 - **Python** (`uv` for dependency management)
 
 ## Data used
 
-DataHub's own real **showcase-ecommerce reference datapack** — ~1,300 entities with
-genuine cross-platform lineage (Postgres → S3 → Snowflake → dbt → Looker/Tableau/PowerBI,
-plus Spark ETL jobs), rather than a hand-built synthetic graph. The datapack has no
+DataHub's own real **showcase-ecommerce reference datapack** — ~1,300 entities with genuine
+cross-platform lineage (Postgres → S3 → Snowflake → dbt → Looker/Tableau/PowerBI, plus
+Spark ETL jobs), rather than a hand-built synthetic graph. The datapack has no
 naturally-occurring recent schema-change event to serve as an incident trigger, so 3
-timestamped field additions are overlaid onto 3 real entities (`seed_data.py`) to create
-3 locked, reproducible incident scenarios of increasing difficulty — the underlying
-lineage graph itself is entirely real DataHub reference data.
+timestamped field additions are overlaid onto 3 real entities (`seed_data.py`) to create 3
+locked, reproducible scenarios of increasing difficulty — the underlying lineage graph is
+entirely real DataHub reference data. Investigation Cards are written back into that same
+instance as first-class catalog documents.
 
 ## Open-source contribution
 
 Building this surfaced a real, reproducible gap in `mcp-server-datahub` itself: its
-`search` tool's filter docs don't warn that `entity_type = report` isn't valid, or
-that PowerBI/Tableau/Looker report-style artifacts are actually indexed as
-`entity_type = dataset` — the agent hit this directly (an LLM guessed `report`, got
-zero results, burned retries before recovering). Filed as a docs fix upstream:
+`search` tool's filter docs don't warn that `entity_type = report` isn't valid, or that
+PowerBI/Tableau/Looker report-style artifacts are actually indexed as
+`entity_type = dataset` — the agent hit this directly (an LLM guessed `report`, got zero
+results, burned retries before recovering). Filed as a docs fix upstream:
 [acryldata/mcp-server-datahub#155](https://github.com/acryldata/mcp-server-datahub/pull/155).
+
+A second, sharper bug surfaced during final validation: the server now exposes
+`sort_by`/`sort_order` on `search`, and a model naturally fills in `sort_by="relevance"` —
+which DataHub OSS has no field to sort on, so OpenSearch rejects every such query with
+`query_shard_exception: No mapping found for [relevance]` → `all shards failed` (HTTP 400).
+It presents as a search-backend outage while actually being an argument-compatibility
+problem. Worked around in this repo by stripping the arguments in code; worth filing
+upstream.
