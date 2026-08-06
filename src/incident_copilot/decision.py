@@ -36,6 +36,7 @@ from .memory import (
     REQUIRED_BEFORE_RETRY,
     EvidenceItem,
     InvestigationCard,
+    confirmed_evidence_keys,
     new_incident_id,
 )
 
@@ -150,8 +151,10 @@ class Findings(BaseModel):
         "'evidence_lineage_confirms_path') that you carried forward from a prior "
         "Investigation Card returned by recall_prior_investigations, rather than "
         "re-confirming with your own tool call this run. Leave empty if you confirmed "
-        "everything yourself. Be honest here -- it is recorded as provenance on the "
-        "card, and inherited evidence is not treated as weaker, only as traceable.",
+        "everything yourself. Every claim here is verified against the cards recall "
+        "actually returned: if none of them confirms the check, the claim is rejected "
+        "and the check is counted as UNCONFIRMED, which lowers your confidence. Only "
+        "list a check you genuinely saw marked confirmed in a recalled card.",
     )
     continues_incident_id: str | None = Field(
         default=None,
@@ -159,6 +162,58 @@ class Findings(BaseModel):
         "its incident_id (e.g. 'INC-20260803-141522'). None if this is a fresh "
         "investigation with no usable prior card.",
     )
+
+
+_EVIDENCE_KEYS = frozenset(name for name, _ in _EVIDENCE_LABELS)
+
+
+def validate_inheritance(findings: Findings, state: dict) -> list[str]:
+    """Check every "I carried this forward" claim against the cards actually recalled,
+    and demote the ones nothing backs. Mutates `findings` in place; returns a
+    human-readable list of what was rejected.
+
+    This closes the one hole the rest of the policy layer would otherwise leave open.
+    Confidence is `checks confirmed / 4`, and a check counts as confirmed either
+    because a tool call proved it this run or because a prior card already proved it.
+    The second half is the model's word alone -- so an agent that wanted to act could
+    reach HIGH confidence by asserting inheritance for checks no investigation ever
+    ran. Here that assertion is verified against `state["prior_cards"]`, which recall
+    populated in Python from real stored payloads. A claim with nothing behind it
+    doesn't just lose its inherited flag: the check goes back to unconfirmed, so it
+    lowers confidence and can pull severity down to no_action, exactly as if the
+    agent had admitted it never checked. Same reasoning as gating write-back in code
+    rather than in the prompt -- an honesty instruction the model usually follows is
+    not a control.
+    """
+    prior: list[InvestigationCard] = state.get("prior_cards") or []
+    backed = confirmed_evidence_keys(prior)
+    recalled_ids = {card.incident_id for card in prior}
+
+    dropped: list[str] = []
+    kept: list[str] = []
+    for key in dict.fromkeys(findings.inherited_evidence or []):
+        if key not in _EVIDENCE_KEYS:
+            dropped.append(f"`{key}` — not one of the four evidence checks")
+            continue
+        if key in backed:
+            kept.append(key)
+            continue
+        dropped.append(
+            f"`{key}` — no recalled Investigation Card confirms this check, so it was "
+            "reset to unconfirmed"
+        )
+        setattr(findings, key, False)
+
+    findings.inherited_evidence = kept
+
+    if findings.continues_incident_id and findings.continues_incident_id not in recalled_ids:
+        dropped.append(
+            f"`continues_incident_id={findings.continues_incident_id}` — that card was "
+            "not among the ones recall returned this run"
+        )
+        findings.continues_incident_id = None
+
+    return dropped
 
 
 def compute_confidence(findings: Findings) -> tuple[str, int, int]:
@@ -223,6 +278,10 @@ def build_card(state: dict) -> InvestigationCard:
     before-retry list from exactly which checks came back false, provenance from the
     tools that really got called, and actions_taken from mutations that really
     succeeded (recorded by the gate in mcp_client.py, not claimed by the model).
+
+    `findings.inherited_evidence` has already been through `validate_inheritance` by
+    the time this runs, so anything still flagged inherited here is backed by a card
+    that really was recalled.
     """
     findings: Findings = state["findings"]
     confidence_level: str = state["confidence_level"]
@@ -272,6 +331,7 @@ def build_card(state: dict) -> InvestigationCard:
         actions_taken=list(state.get("actions_taken", [])),
         continues_incident_id=findings.continues_incident_id,
         reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
+        dropped_inheritance=list(state.get("dropped_inheritance", [])),
     )
 
 
@@ -290,6 +350,9 @@ def build_report_findings_tool(state: dict):
         authorized to use are computed from your answers, not decided by you --
         add_tags/update_description will refuse to run until you've called this."""
         findings = Findings(**kwargs)
+        # Verify inheritance claims BEFORE the arithmetic runs, so an unbacked claim
+        # can't buy confidence it didn't earn.
+        dropped = validate_inheritance(findings, state)
         confidence_level, checked, total = compute_confidence(findings)
         severity = compute_severity(confidence_level, findings)
         state["severity"] = severity
@@ -300,12 +363,20 @@ def build_report_findings_tool(state: dict):
         state["confidence_level"] = confidence_level
         state["checks_confirmed"] = checked
         state["checks_total"] = total
+        state["dropped_inheritance"] = dropped
 
         checklist = "\n".join(
             f"{'✓' if getattr(findings, name) else '✗'} {label}"
             for name, label in _EVIDENCE_LABELS
         )
+        rejected = (
+            "Inheritance claims rejected (nothing recalled backs them; the checks were "
+            "reset to unconfirmed):\n" + "\n".join(f"  - {claim}" for claim in dropped) + "\n"
+            if dropped
+            else ""
+        )
         return (
+            f"{rejected}"
             f"Root-cause confidence: {confidence_level.upper()} "
             f"({checked}/{total} evidence checks confirmed)\n"
             f"Evidence:\n{checklist}\n"

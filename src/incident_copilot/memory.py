@@ -143,6 +143,11 @@ class InvestigationCard(BaseModel):
     continues_incident_id: str | None = None
     reused_checks: int = 0
 
+    # Inheritance claims the code refused to honour because no recalled card actually
+    # confirmed them. Recorded rather than silently discarded: a run that tried to
+    # carry forward evidence it never had is exactly the thing a reader wants to see.
+    dropped_inheritance: list[str] = Field(default_factory=list)
+
     @property
     def missing_evidence(self) -> list[EvidenceItem]:
         return [item for item in self.evidence if not item.confirmed]
@@ -150,6 +155,21 @@ class InvestigationCard(BaseModel):
     @property
     def confirmed_evidence(self) -> list[EvidenceItem]:
         return [item for item in self.evidence if item.confirmed]
+
+
+def confirmed_evidence_keys(cards: list[InvestigationCard]) -> set[str]:
+    """The evidence checks a set of recalled cards genuinely established.
+
+    This is the ground truth an inheritance claim is checked against: the agent may
+    say it carried a check forward, but unless one of the cards actually returned by
+    `recall_prior_investigations` marks that check confirmed, there is nothing to
+    carry. Without this, "inherited" would be a hole straight through the evidence
+    checklist -- the model could reach high confidence by asserting that some earlier
+    run had already done the work.
+    """
+    return {
+        item.key for card in cards for item in card.evidence if item.confirmed
+    }
 
 
 def new_incident_id(now: datetime | None = None) -> str:
@@ -201,6 +221,16 @@ def render_card(card: InvestigationCard) -> str:
         suffix = " _(inherited from prior investigation)_" if item.inherited else ""
         lines.append(f"- [{mark}] {item.label}{suffix}")
     lines.append("")
+
+    if card.dropped_inheritance:
+        lines += [
+            "> **Unbacked inheritance rejected.** The agent claimed to carry forward "
+            "evidence that no recalled card confirmed; those checks were reset to "
+            "unconfirmed before confidence was computed:",
+            "",
+        ]
+        lines += [f"> - {claim}" for claim in card.dropped_inheritance]
+        lines.append("")
 
     if card.hypotheses_tested or card.hypotheses_rejected:
         lines += ["## Hypotheses", ""]
