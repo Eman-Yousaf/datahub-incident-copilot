@@ -250,6 +250,26 @@ def _authorized_targets(tool_name: str, state: dict) -> set[str]:
     return targets
 
 
+def _blocked(mcp_tool, message: str):
+    """A refusal, in whatever shape this tool's `response_format` contract demands.
+
+    DataHub's MCP tools are declared `response_format='content_and_artifact'`, so
+    returning a bare string raises `ValueError` inside LangChain's tool runner --
+    which LangGraph does not recover from. The whole investigation dies with a
+    traceback instead of the model reading the refusal and adjusting.
+
+    That made the gate's central promise ("attempting one will just be blocked")
+    false end-to-end, and it went unnoticed for a long time because a block only
+    fires when the model tries something it was told not to -- which, until the
+    target gate landed, it essentially never did. The scratch harness missed it too,
+    by using a fake tool that didn't declare the real response_format. A refusal has
+    to satisfy exactly the same contract a real result does.
+    """
+    if getattr(mcp_tool, "response_format", None) == "content_and_artifact":
+        return (message, None)
+    return message
+
+
 def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
     """Wraps a mutation tool so it refuses to run until `report_findings` has
     authorized a matching severity tier, and only on the entities this investigation
@@ -265,15 +285,24 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
     async def gated_coroutine(*args, **kwargs):
         severity = state.get("severity")
         if severity is None:
-            return "Blocked: call report_findings first -- it establishes the confidence level and authorized severity tier this tool checks."
+            return _blocked(
+                mcp_tool,
+                "Blocked: call report_findings first -- it establishes the confidence "
+                "level and authorized severity tier this tool checks.",
+            )
         if severity not in allowed:
-            return f"Blocked: severity tier '{severity}' does not authorize {mcp_tool.name}. {SEVERITY_INSTRUCTIONS[severity]}"
+            return _blocked(
+                mcp_tool,
+                f"Blocked: severity tier '{severity}' does not authorize "
+                f"{mcp_tool.name}. {SEVERITY_INSTRUCTIONS[severity]}",
+            )
         if mcp_tool.name == "add_tags":
             tag_urns = kwargs.get("tag_urns") or []
             if "urn:li:tag:incident-severity-high" in tag_urns and severity != "tag_note_escalated":
-                return (
+                return _blocked(
+                    mcp_tool,
                     f"Blocked: severity tier '{severity}' does not authorize the "
-                    f"severity-high tag. {SEVERITY_INSTRUCTIONS[severity]}"
+                    f"severity-high tag. {SEVERITY_INSTRUCTIONS[severity]}",
                 )
 
         entity_urns = list(
@@ -285,11 +314,12 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
         authorized = _authorized_targets(mcp_tool.name, state)
         unauthorized = [urn for urn in entity_urns if urn not in authorized]
         if unauthorized:
-            return (
+            return _blocked(
+                mcp_tool,
                 f"Blocked: {mcp_tool.name} may only touch entities this investigation "
                 f"confirmed something about. Not authorized: {', '.join(unauthorized)}. "
                 f"Authorized this run: "
-                f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}."
+                f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}.",
             )
 
         result = await original_coroutine(*args, **kwargs)

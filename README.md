@@ -49,13 +49,21 @@ policy layer, not the model, decided that the knowledge was now sufficient.
 
 ## Why the trust layer is code, not prompt
 
-Three things the model is never allowed to decide for itself:
+Four things the model is never allowed to decide for itself:
 
 | Decision | Decided by | Where |
 | --- | --- | --- |
 | Confidence level | `confirmed / total` on a 4-item checklist | `decision.py` |
-| Severity tier | `f(confidence, datasets, dashboards, criticality)` | `decision.py` |
+| Severity tier | `f(confidence, datasets, dashboards, criticality, stale mirrors)` | `decision.py` |
 | Whether a write may happen | severity gate wrapping the mutation tools | `mcp_client.py` |
+| *Which entity* a write may touch | `_authorized_targets`: the confirmed root cause, plus mirrors code proved stale | `mcp_client.py` |
+
+That last row exists because of a bug this project found in its own trace. Severity
+answered *how much* the agent may do and never *to what* — so a run quietly tagged a
+mirror table alongside the real root cause, while the authorization text it had just been
+handed said "the exact root-cause URN". The rule had only ever lived in the prompt. Now
+the permitted set is derived in Python from what was actually confirmed, and anything else
+is refused before the tool runs.
 
 And three integrity properties that follow from it:
 
@@ -75,6 +83,27 @@ And three integrity properties that follow from it:
 The severity gate covers *acting on the data*. It deliberately never covers *recording
 what was learned* — the lower the confidence, the more valuable the record.
 
+## Finding what the lineage graph can't tell you
+
+DataHub's lineage is topologically honest: if two datasets are connected, that connection
+is real. It has no concept of whether the connection is *schema-safe*. The same real-world
+table replicated onto another platform can silently keep the old schema after the source
+changes shape, and the graph keeps drawing the same edge either way — an edge asserts
+connectivity, never parity.
+
+So `check_schema_drift` asks the question the graph doesn't: it walks two hops in both
+directions, name-matches same-entity siblings across platforms, and confirms field-by-field
+whether each one actually picked up the change. On DataHub's own showcase-ecommerce
+datapack, the dbt `order_details` model has three such mirrors — snowflake, looker,
+powerbi — and **all three were running stale schema**. Only the snowflake copy is a 1-hop
+sync; the other two read from *that* copy, so a 1-hop check would have missed two of the
+three real findings.
+
+This matters operationally: those mirrors keep producing the same symptom after the root
+cause is fixed, until someone updates them independently. Two or more confirmed-stale
+mirrors is also a code-verified escalation signal feeding `compute_severity` — and, per the
+table above, the only thing besides the root cause that a write-back is permitted to touch.
+
 ## Live demo
 
 https://incident-copilot-demo.centralindia.cloudapp.azure.com — pick a scenario, watch the
@@ -93,8 +122,11 @@ That Do Real Work").
   severity, the inheritance validator, the refusal reason and required-before-retry
   derivation, and the `report_findings` checkpoint the agent must clear before write-back
 - `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server; wraps the
-  mutation tools in the severity gate, records real provenance and real actions taken, and
-  auto-verifies successful write-backs by re-reading the entity
+  mutation tools in the severity and target gates, records real provenance and real actions
+  taken, and auto-verifies successful write-backs by re-reading the entity
+- `src/incident_copilot/mirror_audit.py` — the cross-platform schema-drift check: finds
+  same-entity mirrors via lineage and confirms in code whether each still has the changed
+  field, so the agent can never merely assert that one is stale
 - `src/incident_copilot/agent.py` — the agent loop, bound to DataHub's MCP tools; it
   chooses its own investigation path rather than following a fixed script — three incident
   shapes take three verifiably different paths through the same code

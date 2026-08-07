@@ -49,10 +49,27 @@ inside DataHub that the next investigation reads and continues from.
   instead of rediscovering the same dead end.
 - **The LLM never decides whether writes are allowed. Python does.** Confidence is
   `confirmed / total` on a 4-item evidence checklist. Severity is
-  `f(confidence, affected datasets, affected dashboards, business criticality)` — the same
-  plain function every run, in `decision.py`. Low confidence or an inconclusive outcome
-  makes `add_tags`/`update_description` refuse to run at the code level, and routes to human
-  review. Not a prompt instruction the model usually follows: a control it cannot reach.
+  `f(confidence, affected datasets, affected dashboards, business criticality, confirmed
+  stale mirrors)` — the same plain function every run, in `decision.py`. Low confidence or
+  an inconclusive outcome makes `add_tags`/`update_description` refuse to run at the code
+  level, and routes to human review. Not a prompt instruction the model usually follows: a
+  control it cannot reach.
+- **Nor which entity a write may touch.** Severity answered *how much* the agent may do and
+  never *to what* — a gap found by reading this project's own live trace, where a run tagged
+  a mirror table alongside the real root cause while the authorization text it had just been
+  handed said "the exact root-cause URN". That rule had only ever lived in the prompt.
+  `_authorized_targets` now derives the permitted set in Python: the confirmed root cause,
+  plus — for tagging only — mirrors the drift check *proved* stale. Everything else is
+  refused before the tool runs.
+- **Finds what the lineage graph structurally cannot tell you.** DataHub's lineage is
+  topologically honest but schema-blind: an edge asserts that two datasets are connected,
+  never that they agree on shape. `check_schema_drift` walks two hops in both directions,
+  name-matches the same real-world table across platforms, and confirms field-by-field
+  whether each mirror actually picked up the change. On DataHub's own showcase-ecommerce
+  datapack, all three mirrors of the dbt `order_details` model — snowflake, looker, powerbi
+  — were running stale schema, and two of the three are only reachable at 2 hops. They keep
+  producing the same symptom after the root cause is fixed. The agent supplies the entity
+  and field; the verdict is established by real tool calls in code, never asserted.
 - **Inherited evidence is verified, not taken on faith.** A run that claims it carried a
   check forward from a prior card has that claim checked against the cards recall actually
   returned. An unbacked claim resets the check to unconfirmed — lowering confidence, and
@@ -95,15 +112,19 @@ The agent:
 4. If nothing is found, walks upstream lineage (capped at 3 hops), reasoning about which
    branch to prioritize when a node has several parents.
 5. Once a root cause is confirmed, computes downstream blast radius via lineage.
-6. Reports findings through a required checkpoint: an evidence checklist becomes a
+6. Optionally checks cross-platform schema drift: whether same-entity mirrors on other
+   platforms still carry the field that changed, or will keep producing the symptom after
+   the root cause is fixed.
+7. Reports findings through a required checkpoint: an evidence checklist becomes a
    confidence level becomes a computed severity tier. Inheritance claims are validated here,
    before the arithmetic — code, not the model, decides what happens next.
-7. Writes back only what that tier authorizes — **or refuses outright** — then verifies any
-   mutation actually landed by re-reading the entity.
-8. **Writes the Investigation Card back into DataHub**, always, act or refuse, linked to the
+8. Writes back only what that tier authorizes, and only to the entities code confirmed
+   something about — **or refuses outright** — then verifies any mutation actually landed by
+   re-reading the entity.
+9. **Writes the Investigation Card back into DataHub**, always, act or refuse, linked to the
    affected assets and to the prior cards it continued.
-9. Prints a structured summary: root cause, confidence/severity, blast radius, what was
-   written back, and which checks it was able to skip because a previous run had done them.
+10. Prints a structured summary: root cause, confidence/severity, blast radius, what was
+    written back, and which checks it was able to skip because a previous run had done them.
 
 ## Technologies
 
