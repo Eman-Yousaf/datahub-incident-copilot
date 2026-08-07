@@ -15,6 +15,7 @@ from .decision import SEVERITY_INSTRUCTIONS, build_card, build_report_findings_t
 from .mcp_util import extract_text as _extract_text
 from .mcp_util import with_text as _with_text
 from .memory import build_recall_tool, build_write_card_tool
+from .mirror_audit import build_mirror_audit_tool
 
 
 def build_mcp_client() -> MultiServerMCPClient:
@@ -317,6 +318,11 @@ async def datahub_tools(incident_report: str = ""):
             _wrap_with_provenance(tool, decision_state)
 
         filtered.append(build_report_findings_tool(decision_state))
+        filtered.append(
+            build_mirror_audit_tool(
+                decision_state, by_name["get_lineage"], by_name["list_schema_fields"]
+            )
+        )
 
         # The persistent-memory layer. These three MCP tools stay internal (see
         # INTERNAL_TOOL_NAMES) and are called from Python, so the agent gets exactly

@@ -231,11 +231,20 @@ def compute_confidence(findings: Findings) -> tuple[str, int, int]:
     return level, checked, total
 
 
-def compute_severity(confidence_level: str, findings: Findings) -> SeverityTier:
+def compute_severity(
+    confidence_level: str, findings: Findings, schema_drift: dict | None = None
+) -> SeverityTier:
     """Severity = f(confidence, affected datasets, affected dashboards, business
-    criticality) -- a plain function, not a judgment call the model makes freely.
-    Low confidence (or inconclusive) always routes to no_action: uncertainty means
-    a human reviews it, the agent doesn't act on a guess.
+    criticality, confirmed schema drift) -- a plain function, not a judgment call the
+    model makes freely. Low confidence (or inconclusive) always routes to no_action:
+    uncertainty means a human reviews it, the agent doesn't act on a guess.
+
+    `schema_drift` is `state["schema_drift"]` from mirror_audit.py's check_schema_drift
+    tool (None if that optional check was never run this investigation) -- two or more
+    confirmed-stale mirrors is a real, code-verified signal of ongoing risk beyond the
+    blast-radius count alone, so it's one more OR-condition on the same escalation
+    tier. Every existing condition and return path here is unchanged; the default
+    `None` makes this a no-op for any run that didn't call the check.
     """
     if findings.outcome == "inconclusive" or confidence_level == "low":
         return "no_action"
@@ -247,7 +256,13 @@ def compute_severity(confidence_level: str, findings: Findings) -> SeverityTier:
         # Acts, but doesn't escalate on medium confidence even with a big blast
         # radius -- not fully sure it's even the right root cause yet.
         return "tag_and_note"
-    if spans_multiple_platforms or total_affected >= 10 or findings.business_criticality == "high":
+    stale_mirrors = len((schema_drift or {}).get("mirrors_stale", []))
+    if (
+        spans_multiple_platforms
+        or total_affected >= 10
+        or findings.business_criticality == "high"
+        or stale_mirrors >= 2
+    ):
         return "tag_note_escalated"
     return "tag_and_note"
 
@@ -289,6 +304,9 @@ def build_card(state: dict) -> InvestigationCard:
     total: int = state["checks_total"]
     severity: SeverityTier = state["severity"]
     inherited = set(findings.inherited_evidence or [])
+    schema_drift = state.get("schema_drift") or {}
+    mirrors_checked = schema_drift.get("mirrors_checked", [])
+    mirrors_stale = schema_drift.get("mirrors_stale", [])
 
     decision = "REFUSAL" if severity == "no_action" else "ACTION"
     evidence = [
@@ -332,6 +350,10 @@ def build_card(state: dict) -> InvestigationCard:
         continues_incident_id=findings.continues_incident_id,
         reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
         dropped_inheritance=list(state.get("dropped_inheritance", [])),
+        schema_drift_field=schema_drift.get("checked_field"),
+        schema_drift_mirrors_checked=len(mirrors_checked),
+        schema_drift_mirrors_stale=len(mirrors_stale),
+        schema_drift_stale_platforms=[m.get("platform", "unknown") for m in mirrors_stale],
     )
 
 
@@ -354,7 +376,8 @@ def build_report_findings_tool(state: dict):
         # can't buy confidence it didn't earn.
         dropped = validate_inheritance(findings, state)
         confidence_level, checked, total = compute_confidence(findings)
-        severity = compute_severity(confidence_level, findings)
+        schema_drift = state.get("schema_drift")
+        severity = compute_severity(confidence_level, findings, schema_drift)
         state["severity"] = severity
         state["root_cause_urn"] = findings.root_cause_urn
         # Everything build_card needs, captured at the moment the policy ran rather
@@ -375,15 +398,36 @@ def build_report_findings_tool(state: dict):
             if dropped
             else ""
         )
+        mirrors_checked = (schema_drift or {}).get("mirrors_checked", [])
+        mirrors_stale = (schema_drift or {}).get("mirrors_stale", [])
+        if schema_drift is None:
+            drift_line = (
+                "Schema drift: not checked this run (optional -- call "
+                "check_schema_drift if a same-entity mirror on another platform "
+                "might be running stale schema).\n"
+            )
+        elif not mirrors_checked:
+            drift_line = (
+                "Schema drift: check_schema_drift ran but found no same-entity "
+                "mirrors to check.\n"
+            )
+        else:
+            drift_line = (
+                f"Schema drift: {len(mirrors_stale)} of {len(mirrors_checked)} "
+                f"same-entity mirror(s) stale on `{schema_drift.get('checked_field')}`.\n"
+            )
+
         return (
             f"{rejected}"
             f"Root-cause confidence: {confidence_level.upper()} "
             f"({checked}/{total} evidence checks confirmed)\n"
             f"Evidence:\n{checklist}\n"
+            f"{drift_line}"
             f"Severity = f(confidence={confidence_level}, "
             f"affected_datasets={findings.affected_dataset_count}, "
             f"affected_dashboards={findings.affected_dashboard_count}, "
-            f"business_criticality={findings.business_criticality}) "
+            f"business_criticality={findings.business_criticality}, "
+            f"stale_mirrors={len(mirrors_stale)}) "
             f"= {severity}\n"
             f"Authorized action: {SEVERITY_INSTRUCTIONS[severity]}\n"
             "Then call write_investigation_card (always -- it is never blocked, and a "

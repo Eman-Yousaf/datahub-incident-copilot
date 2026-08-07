@@ -148,6 +148,14 @@ class InvestigationCard(BaseModel):
     # carry forward evidence it never had is exactly the thing a reader wants to see.
     dropped_inheritance: list[str] = Field(default_factory=list)
 
+    # Cross-platform schema-drift check (mirror_audit.py). Recomputed fresh every
+    # run -- never inherited via recall/validate_inheritance, so the already-hardened
+    # inheritance logic above stays untouched by this feature.
+    schema_drift_field: str | None = None
+    schema_drift_mirrors_checked: int = 0
+    schema_drift_mirrors_stale: int = 0
+    schema_drift_stale_platforms: list[str] = Field(default_factory=list)
+
     @property
     def missing_evidence(self) -> list[EvidenceItem]:
         return [item for item in self.evidence if not item.confirmed]
@@ -238,6 +246,23 @@ def render_card(card: InvestigationCard) -> str:
             lines.append(f"- Tested: {hypothesis}")
         for hypothesis in card.hypotheses_rejected:
             lines.append(f"- Rejected: {hypothesis}")
+        lines.append("")
+
+    if card.schema_drift_mirrors_checked > 0:
+        lines += ["## Schema drift (same-entity mirrors on other platforms)", ""]
+        if card.schema_drift_mirrors_stale:
+            lines.append(
+                f"**{card.schema_drift_mirrors_stale} of {card.schema_drift_mirrors_checked}** "
+                f"mirror(s) of the changed field `{card.schema_drift_field}` are running on "
+                "stale schema -- DataHub's lineage shows them as connected, but nothing "
+                "flags that they never picked up this change:"
+            )
+            lines += [f"- {platform}" for platform in card.schema_drift_stale_platforms]
+        else:
+            lines.append(
+                f"Checked {card.schema_drift_mirrors_checked} same-entity mirror(s) for "
+                f"`{card.schema_drift_field}` -- all current."
+            )
         lines.append("")
 
     if card.decision == "REFUSAL":
