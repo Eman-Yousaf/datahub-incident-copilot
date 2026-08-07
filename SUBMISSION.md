@@ -164,10 +164,12 @@ PowerBI/Tableau/Looker report-style artifacts are actually indexed as
 results, burned retries before recovering). Filed as a docs fix upstream:
 [acryldata/mcp-server-datahub#155](https://github.com/acryldata/mcp-server-datahub/pull/155).
 
-A second, sharper bug surfaced during final validation: the server now exposes
-`sort_by`/`sort_order` on `search`, and a model naturally fills in `sort_by="relevance"` —
-which DataHub OSS has no field to sort on, so OpenSearch rejects every such query with
-`query_shard_exception: No mapping found for [relevance]` → `all shards failed` (HTTP 400).
-It presents as a search-backend outage while actually being an argument-compatibility
-problem. Worked around in this repo by stripping the arguments in code; worth filing
-upstream.
+A second, sharper bug surfaced during validation: the server exposes `sort_by`/`sort_order`
+on `search`, and a model naturally fills in `sort_by="relevance"` — which DataHub OSS has no
+field to sort on, so OpenSearch rejects every such query with `query_shard_exception: No
+mapping found for [relevance]` → `all shards failed` (HTTP 400). It presents as a
+search-backend outage while actually being an unvalidated-argument problem. Worked around in
+this repo by stripping the arguments in code (`_wrap_search_sort_compat` in `mcp_client.py`);
+filed as a behavioral fix upstream:
+[acryldata/mcp-server-datahub#198](https://github.com/acryldata/mcp-server-datahub/pull/198)
+— normalizes `sort_by="relevance"` to no-op rather than forwarding it to the backend.
