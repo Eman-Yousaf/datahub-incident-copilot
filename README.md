@@ -1,63 +1,156 @@
 # Incident Copilot
 
-**"Order counts on our dashboards look wrong." Incident Copilot investigates — live, on
-DataHub's real lineage graph — and writes what it finds back into the catalog.**
+**Incident Copilot is a trust-aware incident investigation agent that gathers evidence,
+refuses unsafe actions through deterministic policy, writes structured operational
+knowledge back into DataHub, and enables future investigations to continue instead of
+starting from scratch.**
 
-Point it at a one-line incident report. It searches DataHub for the entity involved,
-narrates its own reasoning as it goes ("checking `order_status_detail` — description
-mentions a new 'Backordered' sub-status, added recently — that's a plausible root
-cause"), decides for itself whether to walk further upstream or stop, computes the real
-downstream blast radius, and tags + annotates the responsible entity so the next person
-(or agent) inherits the investigation instead of re-doing it. Not a fixed 5-step
-pipeline with narration bolted on afterward — three different incident shapes take three
-different, verifiably different paths through the same code (see
-`examples/sample_incident_report.md` for an unedited transcript).
+Most data-incident agents answer a question once and forget it. The next time the same
+dashboard looks wrong, the next run starts cold: same searches, same lineage walks, same
+dead ends, same uncertainty. And when an agent isn't sure, it usually either guesses
+anyway or produces nothing at all.
 
-Before any write-back, the agent has to clear a code-enforced checkpoint, not just a
-prompt suggestion: it reports which of 4 evidence items it actually confirmed via tool
-calls, a confidence level (low/medium/high — a heuristic bucket, never a fabricated
-precise percentage) and severity tier are computed from that in plain Python
-(`decision.py`), and low confidence blocks `add_tags`/`update_description` outright,
-routing to a human-review recommendation instead. Every successful mutation re-reads
-the entity from DataHub afterward, so the trace shows the tag/note actually landed
-instead of asking you to trust a bare `success: true`.
+Incident Copilot treats both of those as design problems.
+
+**Whether the agent is allowed to write is decided in Python, never by the LLM.** The
+model supplies evidence — which of four checks a tool call actually confirmed. Confidence
+is `confirmed / total`. Severity is a fixed function of confidence and blast radius. Below
+a threshold, the write-back tools refuse to run at all: not discouraged in a prompt,
+blocked in `decision.py`. The model can't argue its way past arithmetic.
+
+**A refusal is not a failed run — it's the output.** Every investigation, including one
+that refuses to act, ends by writing an **Investigation Card** into DataHub as a
+`document` entity linked to the assets it was about. The card records what was checked,
+what was missing, which hypotheses were disproven, why action was withheld, and *exactly
+what evidence would make action safe next time*. A human opening the dataset page in
+DataHub sees the same card the next agent run will read.
+
+**The next investigation continues instead of restarting.** Before anything else, the
+agent recalls the cards stored for this incident, inherits the checks already confirmed,
+skips the hypotheses already ruled out, and spends its tool calls only on what's still
+missing or may have changed. Uncertainty from run 1 becomes the agenda for run 2.
+
+## The demo, in two runs
+
+**Run 1 — the agent refuses.** Evidence comes back 2/4. Confidence LOW → severity
+`no_action` → `add_tags` and `update_description` are blocked at the code level. Zero
+writes to the catalog. But the run is not empty: card `INC-…` lands in DataHub saying
+*"lineage path not confirmed; downstream blast radius never measured; establish those and
+action becomes safe."*
+
+**Run 2 — the environment has changed, and the agent picks up where it left off.** Recall
+returns that card. The agent doesn't re-run the two confirmed checks; it goes straight for
+the two missing ones. Now 4/4 → HIGH → severity `tag_note_escalated` → tags and an
+incident note are written to the exact root-cause URN, then re-read from DataHub to prove
+they landed. A second card is written, linked back to the first.
+
+Same code, same prompt. What changed is that the agent had prior knowledge — and the
+policy layer, not the model, decided that the knowledge was now sufficient.
+
+## Why the trust layer is code, not prompt
+
+Four things the model is never allowed to decide for itself:
+
+| Decision | Decided by | Where |
+| --- | --- | --- |
+| Confidence level | `confirmed / total` on a 4-item checklist | `decision.py` |
+| Severity tier | `f(confidence, datasets, dashboards, criticality, stale mirrors)` | `decision.py` |
+| Whether a write may happen | severity gate wrapping the mutation tools | `mcp_client.py` |
+| *Which entity* a write may touch | `_authorized_targets`: the confirmed root cause, plus mirrors code proved stale | `mcp_client.py` |
+
+That last row exists because of a bug this project found in its own trace. Severity
+answered *how much* the agent may do and never *to what* — so a run quietly tagged a
+mirror table alongside the real root cause, while the authorization text it had just been
+handed said "the exact root-cause URN". The rule had only ever lived in the prompt. Now
+the permitted set is derived in Python from what was actually confirmed, and anything else
+is refused before the tool runs.
+
+And three integrity properties that follow from it:
+
+- **Inherited evidence is verified, not taken on faith.** If a run claims it carried a
+  check forward from a prior card, that claim is checked against the cards recall actually
+  returned. Unbacked claims don't just lose a badge — the check is reset to unconfirmed,
+  which lowers confidence and can pull severity back down to `no_action`. (This is a real
+  fix, not a hypothetical: a validation run claimed to inherit a check from cards that had
+  confirmed nothing.)
+- **The card is built by Python, not written by the LLM.** The model supplies evidence;
+  every derived field — confidence, severity, the refusal reason, the required-before-retry
+  list — is computed. Two runs with identical evidence produce identical cards.
+- **Write-backs are verified.** Every successful mutation re-reads the entity from DataHub
+  and shows the tag or note present, rather than reporting a bare `success: true`. The card
+  write-back does the same.
+
+The severity gate covers *acting on the data*. It deliberately never covers *recording
+what was learned* — the lower the confidence, the more valuable the record.
+
+## Finding what the lineage graph can't tell you
+
+DataHub's lineage is topologically honest: if two datasets are connected, that connection
+is real. It has no concept of whether the connection is *schema-safe*. The same real-world
+table replicated onto another platform can silently keep the old schema after the source
+changes shape, and the graph keeps drawing the same edge either way — an edge asserts
+connectivity, never parity.
+
+So `report_findings` asks the question the graph doesn't, automatically: whenever it has a
+confirmed root cause and the field that changed, it walks two hops in both directions,
+name-matches same-entity siblings across platforms, and confirms field-by-field whether
+each one actually picked up the change — the same demotion-not-request pattern as the rest
+of this table, not a tool the agent has to remember to reach for. On DataHub's own
+showcase-ecommerce datapack, the dbt `order_details` model has three such mirrors —
+snowflake, looker, powerbi — and **all three were running stale schema**. Only the
+snowflake copy is a 1-hop sync; the other two read from *that* copy, so a 1-hop check
+would have missed two of the three real findings.
+
+This matters operationally: those mirrors keep producing the same symptom after the root
+cause is fixed, until someone updates them independently. Two or more confirmed-stale
+mirrors is also a code-verified escalation signal feeding `compute_severity` — and, per the
+table above, the only thing besides the root cause that a write-back is permitted to touch.
+
+## Live demo
+
+https://incident-copilot-demo.centralindia.cloudapp.azure.com — pick a scenario, watch the
+agent investigate a real DataHub instance in your browser, no setup required. Same agent
+and tool code path as the CLI, streamed over SSE.
 
 Built for the [DataHub Agent Hackathon](https://datahub.devpost.com/), Track 1 ("Agents
 That Do Real Work").
 
-**Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — pick a
-scenario, watch the agent investigate a real DataHub instance in your browser, no setup
-required. (`webapp.py` — same agent/tool code path as the CLI, streamed over SSE.)
-
-## Status
-
-Milestones 1-4 complete: DataHub's showcase-ecommerce datapack is seeded with 3 locked
-incident-trigger scenarios, and the ReAct agent runs end-to-end against all 3 — resolving
-the right entity, confirming a root-cause signal via a direct tool call before acting on
-it, computing the correct blast radius, and choosing the correct write-back tier (tag-only
-/ tag+note / tag+note+escalated) based on what it actually found. Live narration streams
-as the investigation happens (`cli.py`/`webapp.py` + `narrate.py`) — a sample transcript
-is in `examples/sample_incident_report.md`. Deployed publicly (see live demo link
-above). The demo video is the one remaining piece.
-
 ## Architecture
 
-- `seed_data.py` — loads DataHub's real showcase-ecommerce datapack into a local
-  quickstart instance, and locks the incident trigger points used for the demo
-- `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server; also gates
-  the mutation tools behind `decision.py`'s computed severity and auto-verifies
-  successful write-backs by re-reading the entity
-- `src/incident_copilot/agent.py` — the ReAct agent loop (LangGraph + Azure OpenAI) bound to
-  DataHub's MCP tools (read + mutation); the agent decides its own investigation path,
-  it does not follow a fixed script
-- `src/incident_copilot/decision.py` — the evidence checklist → confidence → severity
-  computation, and the `report_findings` tool the agent must call before write-back
-- `src/incident_copilot/narrate.py` — live, first-person narration of the agent's actual
-  tool calls and reasoning as they happen
+- `src/incident_copilot/memory.py` — the Investigation Card: model, markdown+JSON
+  rendering, exact parse-back, the Python-driven `recall_prior_investigations` tool and the
+  ungated `write_investigation_card` tool
+- `src/incident_copilot/decision.py` — the trust layer: evidence checklist → confidence →
+  severity, the inheritance validator, the refusal reason and required-before-retry
+  derivation, and the `report_findings` checkpoint the agent must clear before write-back
+- `src/incident_copilot/mcp_client.py` — connects to the DataHub MCP server; wraps the
+  mutation tools in the severity and target gates, records real provenance and real actions
+  taken, and auto-verifies successful write-backs by re-reading the entity
+- `src/incident_copilot/mirror_audit.py` — the cross-platform schema-drift check: finds
+  same-entity mirrors via lineage and confirms in code whether each still has the changed
+  field. Run automatically by `report_findings`, not on the agent's initiative, so the
+  agent can never merely assert a mirror is stale, or skip the check by not asking
+- `src/incident_copilot/agent.py` — the agent loop, bound to DataHub's MCP tools; it
+  chooses its own investigation path rather than following a fixed script — three incident
+  shapes take three verifiably different paths through the same code
+- `src/incident_copilot/narrate.py` — live, first-person narration of the actual tool calls
+  and reasoning as they happen
+- `seed_data.py` — loads DataHub's real showcase-ecommerce datapack and locks the incident
+  trigger points used for the demo
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
-- `webapp.py` — FastAPI wrapper streaming the same agent's narration to a browser via
-  SSE, for the public live demo (fixed scenario buttons, not free-form text)
-- `examples/` — sample recorded investigation output
+- `webapp.py` — FastAPI wrapper streaming the same agent to a browser via SSE
+- `tests/test_write_back_gate.py` — regression tests for the gate itself: what it blocks,
+  what it permits, and that a refusal returns in the shape LangChain demands rather than
+  crashing the run
+- `tests/test_report_findings_drift.py` — regression tests for the automatic schema-drift
+  audit: when it runs, when it cleanly stays off, and that a malformed tool response can't
+  crash the mandatory `report_findings` checkpoint. Both test files run with
+  `python tests/test_*.py`, no live DataHub needed
+- `examples/` — unedited recorded investigation output
+
+Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those
+are implementation choices; the thing being built is the trust and memory layer around
+them.
 
 ## Setup
 
@@ -71,6 +164,7 @@ cp .env.example .env   # fill in AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY, D
 datahub docker quickstart
 python seed_data.py
 python cli.py "our revenue dashboard looks wrong"
+# run it a second time -- it will recall the first investigation and continue it
 ```
 
 ## License

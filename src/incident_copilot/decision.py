@@ -16,12 +16,30 @@ a "no_action" severity -- low confidence, or an inconclusive investigation -- ma
 add_tags/update_description refuse to run, regardless of what the agent tries. That's
 the enforced "do not act" path: uncertainty routes to a human-review recommendation
 instead of an autonomous write, and that routing can't be talked around by the model.
+
+The gate covers *acting on the data* -- tagging and annotating catalog entities. It
+deliberately does not cover *recording what was learned*: `report_findings` always
+builds an Investigation Card (see memory.py) and that card is always written back,
+refusals included. A run that refuses to act still produces the most useful artifact
+it can -- an explicit record of what was checked, what was missing, and exactly what
+evidence would make action safe next time -- and every field on it is derived here in
+Python from the agent's evidence, never authored freehand by the model.
 """
 
+from datetime import datetime, timezone
 from typing import Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+from .memory import (
+    REQUIRED_BEFORE_RETRY,
+    EvidenceItem,
+    InvestigationCard,
+    confirmed_evidence_keys,
+    new_incident_id,
+)
+from .mirror_audit import audit_schema_drift
 
 SeverityTier = Literal["no_action", "tag_only", "tag_and_note", "tag_note_escalated"]
 
@@ -46,7 +64,9 @@ SEVERITY_INSTRUCTIONS: dict[SeverityTier, str] = {
     "tag_note_escalated": (
         "You may call add_tags with BOTH 'urn:li:tag:incident-flagged' and "
         "'urn:li:tag:incident-severity-high', and update_description(operation="
-        "'append'), all on the exact root-cause URN."
+        "'append'), all on the exact root-cause URN. If report_findings' automatic "
+        "cross-platform check found stale mirrors, add_tags (not update_description) "
+        "may also target those exact mirror URNs -- any other entity is blocked."
     ),
 }
 
@@ -114,6 +134,100 @@ class Findings(BaseModel):
         "have no specific signal either way -- don't guess 'high' without a reason "
         "you can point to.",
     )
+    hypotheses_tested: list[str] = Field(
+        default_factory=list,
+        description="Short descriptions of the explanations you actually investigated "
+        "this run, e.g. 'recent schema change on order_details introduced a new status "
+        "value'. One line each.",
+    )
+    hypotheses_rejected: list[str] = Field(
+        default_factory=list,
+        description="Of those, the ones a tool call actually ruled OUT, with the reason, "
+        "e.g. 'upstream promotions table changed -- rejected, no field modified in the "
+        "incident window'. These are recorded so a future investigation does not waste "
+        "calls re-testing them; only list a hypothesis here if you genuinely disproved "
+        "it, not if you merely didn't get to it.",
+    )
+    inherited_evidence: list[str] = Field(
+        default_factory=list,
+        description="Evidence check names (exactly as spelled in this schema, e.g. "
+        "'evidence_lineage_confirms_path') that you carried forward from a prior "
+        "Investigation Card returned by recall_prior_investigations, rather than "
+        "re-confirming with your own tool call this run. Leave empty if you confirmed "
+        "everything yourself. Every claim here is verified against the cards recall "
+        "actually returned: if none of them confirms the check, the claim is rejected "
+        "and the check is counted as UNCONFIRMED, which lowers your confidence. Only "
+        "list a check you genuinely saw marked confirmed in a recalled card.",
+    )
+    continues_incident_id: str | None = Field(
+        default=None,
+        description="If recall_prior_investigations returned a card you are continuing, "
+        "its incident_id (e.g. 'INC-20260803-141522'). None if this is a fresh "
+        "investigation with no usable prior card.",
+    )
+    changed_field_path: str | None = Field(
+        default=None,
+        description="The exact fieldPath you confirmed in step 2 SIGNAL as the field "
+        "that changed and explains the symptom -- e.g. 'order_status_detail'. Set "
+        "this whenever outcome is 'root_cause_found' and SIGNAL was confirmed via a "
+        "schema field this run (the normal case): it automatically triggers a "
+        "cross-platform check for same-entity mirrors on other platforms running "
+        "stale schema. Leave it None only when the root cause came purely from a "
+        "prior Investigation Card with no fresh field name of your own this run, or "
+        "when outcome is 'inconclusive'.",
+    )
+
+
+_EVIDENCE_KEYS = frozenset(name for name, _ in _EVIDENCE_LABELS)
+
+
+def validate_inheritance(findings: Findings, state: dict) -> list[str]:
+    """Check every "I carried this forward" claim against the cards actually recalled,
+    and demote the ones nothing backs. Mutates `findings` in place; returns a
+    human-readable list of what was rejected.
+
+    This closes the one hole the rest of the policy layer would otherwise leave open.
+    Confidence is `checks confirmed / 4`, and a check counts as confirmed either
+    because a tool call proved it this run or because a prior card already proved it.
+    The second half is the model's word alone -- so an agent that wanted to act could
+    reach HIGH confidence by asserting inheritance for checks no investigation ever
+    ran. Here that assertion is verified against `state["prior_cards"]`, which recall
+    populated in Python from real stored payloads. A claim with nothing behind it
+    doesn't just lose its inherited flag: the check goes back to unconfirmed, so it
+    lowers confidence and can pull severity down to no_action, exactly as if the
+    agent had admitted it never checked. Same reasoning as gating write-back in code
+    rather than in the prompt -- an honesty instruction the model usually follows is
+    not a control.
+    """
+    prior: list[InvestigationCard] = state.get("prior_cards") or []
+    backed = confirmed_evidence_keys(prior)
+    recalled_ids = {card.incident_id for card in prior}
+
+    dropped: list[str] = []
+    kept: list[str] = []
+    for key in dict.fromkeys(findings.inherited_evidence or []):
+        if key not in _EVIDENCE_KEYS:
+            dropped.append(f"`{key}` — not one of the four evidence checks")
+            continue
+        if key in backed:
+            kept.append(key)
+            continue
+        dropped.append(
+            f"`{key}` — no recalled Investigation Card confirms this check, so it was "
+            "reset to unconfirmed"
+        )
+        setattr(findings, key, False)
+
+    findings.inherited_evidence = kept
+
+    if findings.continues_incident_id and findings.continues_incident_id not in recalled_ids:
+        dropped.append(
+            f"`continues_incident_id={findings.continues_incident_id}` — that card was "
+            "not among the ones recall returned this run"
+        )
+        findings.continues_incident_id = None
+
+    return dropped
 
 
 def compute_confidence(findings: Findings) -> tuple[str, int, int]:
@@ -131,11 +245,22 @@ def compute_confidence(findings: Findings) -> tuple[str, int, int]:
     return level, checked, total
 
 
-def compute_severity(confidence_level: str, findings: Findings) -> SeverityTier:
+def compute_severity(
+    confidence_level: str, findings: Findings, schema_drift: dict | None = None
+) -> SeverityTier:
     """Severity = f(confidence, affected datasets, affected dashboards, business
-    criticality) -- a plain function, not a judgment call the model makes freely.
-    Low confidence (or inconclusive) always routes to no_action: uncertainty means
-    a human reviews it, the agent doesn't act on a guess.
+    criticality, confirmed schema drift) -- a plain function, not a judgment call the
+    model makes freely. Low confidence (or inconclusive) always routes to no_action:
+    uncertainty means a human reviews it, the agent doesn't act on a guess.
+
+    `schema_drift` is `state["schema_drift"]`, populated automatically inside
+    `report_findings` (see `audit_schema_drift` in mirror_audit.py) whenever a root
+    cause and a freshly-confirmed field name are both available -- None if there was
+    nothing to audit this run (inconclusive outcome, or no fresh field name). Two or
+    more confirmed-stale mirrors is a real, code-verified signal of ongoing risk
+    beyond the blast-radius count alone, so it's one more OR-condition on the same
+    escalation tier. Every existing condition and return path here is unchanged; the
+    default `None` makes this a no-op whenever there was nothing to check.
     """
     if findings.outcome == "inconclusive" or confidence_level == "low":
         return "no_action"
@@ -147,45 +272,222 @@ def compute_severity(confidence_level: str, findings: Findings) -> SeverityTier:
         # Acts, but doesn't escalate on medium confidence even with a big blast
         # radius -- not fully sure it's even the right root cause yet.
         return "tag_and_note"
-    if spans_multiple_platforms or total_affected >= 10 or findings.business_criticality == "high":
+    stale_mirrors = len((schema_drift or {}).get("mirrors_stale", []))
+    if (
+        spans_multiple_platforms
+        or total_affected >= 10
+        or findings.business_criticality == "high"
+        or stale_mirrors >= 2
+    ):
         return "tag_note_escalated"
     return "tag_and_note"
 
 
-def build_report_findings_tool(state: dict):
+def _refusal_reason(findings: Findings, confidence_level: str, checked: int, total: int) -> str:
+    """Why the policy withheld action, stated in terms of the checks themselves.
+    Derived, not written by the model -- so the reason on the card always matches the
+    arithmetic that actually produced the refusal.
+    """
+    if findings.outcome == "inconclusive":
+        return (
+            "No root cause was established, so there is nothing to act on. "
+            f"{findings.root_cause_summary}".strip()
+        )
+    return (
+        f"Only {checked} of {total} evidence checks were confirmed, which is "
+        f"{confidence_level.upper()} confidence. Autonomous write-back requires at "
+        "least medium confidence, so the write-back tools were blocked and this is "
+        "routed to human review instead."
+    )
+
+
+def build_card(state: dict) -> InvestigationCard:
+    """Assemble the durable Investigation Card from what actually happened this run.
+
+    Every field is derived: evidence from the agent's checklist, confidence/severity
+    from the functions above, the refusal reason from the arithmetic, the required-
+    before-retry list from exactly which checks came back false, provenance from the
+    tools that really got called, and actions_taken from mutations that really
+    succeeded (recorded by the gate in mcp_client.py, not claimed by the model).
+
+    `findings.inherited_evidence` has already been through `validate_inheritance` by
+    the time this runs, so anything still flagged inherited here is backed by a card
+    that really was recalled.
+    """
+    findings: Findings = state["findings"]
+    confidence_level: str = state["confidence_level"]
+    checked: int = state["checks_confirmed"]
+    total: int = state["checks_total"]
+    severity: SeverityTier = state["severity"]
+    inherited = set(findings.inherited_evidence or [])
+    schema_drift = state.get("schema_drift") or {}
+    mirrors_checked = schema_drift.get("mirrors_checked", [])
+    mirrors_stale = schema_drift.get("mirrors_stale", [])
+
+    decision = "REFUSAL" if severity == "no_action" else "ACTION"
+    evidence = [
+        EvidenceItem(
+            key=name,
+            label=label,
+            confirmed=getattr(findings, name),
+            inherited=name in inherited and getattr(findings, name),
+        )
+        for name, label in _EVIDENCE_LABELS
+    ]
+
+    return InvestigationCard(
+        incident_id=state.setdefault("incident_id", new_incident_id()),
+        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        trigger=state.get("trigger", ""),
+        subject_urn=state.get("subject_urn"),
+        root_cause_urn=findings.root_cause_urn,
+        root_cause_summary=findings.root_cause_summary,
+        outcome=findings.outcome,
+        evidence=evidence,
+        hypotheses_tested=findings.hypotheses_tested,
+        hypotheses_rejected=findings.hypotheses_rejected,
+        confidence_level=confidence_level,
+        checks_confirmed=checked,
+        checks_total=total,
+        severity=severity,
+        decision=decision,
+        refusal_reason=(
+            _refusal_reason(findings, confidence_level, checked, total)
+            if decision == "REFUSAL"
+            else ""
+        ),
+        required_before_retry=(
+            [REQUIRED_BEFORE_RETRY[name] for name, _ in _EVIDENCE_LABELS if not getattr(findings, name)]
+            if decision == "REFUSAL"
+            else []
+        ),
+        provenance=sorted(state.get("tools_used", set())),
+        actions_taken=list(state.get("actions_taken", [])),
+        continues_incident_id=findings.continues_incident_id,
+        reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
+        dropped_inheritance=list(state.get("dropped_inheritance", [])),
+        schema_drift_field=schema_drift.get("checked_field"),
+        schema_drift_mirrors_checked=len(mirrors_checked),
+        schema_drift_mirrors_stale=len(mirrors_stale),
+        schema_drift_stale_platforms=[m.get("platform", "unknown") for m in mirrors_stale],
+    )
+
+
+def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_fields_tool=None):
     """Returns the report_findings tool, bound to `state` (a plain dict shared with
     mcp_client.py's mutation-tool gate). Calling this tool is how the agent's
     self-reported evidence becomes the code-computed severity that gates write-back.
+
+    Also runs the cross-platform schema-drift audit itself, whenever there's enough
+    to run it on. This used to be a separate tool (`check_schema_drift`) the agent
+    could choose to call or skip -- but a finding this central to the pitch can't
+    depend on the model remembering to ask for it. `get_lineage_tool`/
+    `list_schema_fields_tool` are the raw MCP tools `audit_schema_drift` needs; if
+    either is unavailable, the audit is silently skipped rather than failing the
+    mandatory checkpoint.
     """
 
     @tool(args_schema=Findings)
-    def report_findings(**kwargs) -> str:
+    async def report_findings(**kwargs) -> str:
         """Call this exactly once, after you've either confirmed a root cause or
         concluded inconclusive, and BEFORE any add_tags/update_description call.
         Reports your evidence checklist honestly (only mark an item TRUE if a tool
         call actually confirmed it). Confidence and the write-back tier you're
         authorized to use are computed from your answers, not decided by you --
-        add_tags/update_description will refuse to run until you've called this."""
+        add_tags/update_description will refuse to run until you've called this. If
+        you confirmed a root cause via a specific schema field this run (the normal
+        case), report it in changed_field_path -- this automatically checks whether
+        same-entity mirrors on other platforms are running stale schema."""
         findings = Findings(**kwargs)
+        # Verify inheritance claims BEFORE the arithmetic runs, so an unbacked claim
+        # can't buy confidence it didn't earn.
+        dropped = validate_inheritance(findings, state)
+
+        schema_drift: dict | None = None
+        if (
+            findings.outcome == "root_cause_found"
+            and findings.root_cause_urn
+            and findings.changed_field_path
+            and get_lineage_tool is not None
+            and list_schema_fields_tool is not None
+        ):
+            try:
+                schema_drift = await audit_schema_drift(
+                    get_lineage_tool,
+                    list_schema_fields_tool,
+                    findings.root_cause_urn,
+                    findings.changed_field_path,
+                )
+            except Exception:  # noqa: BLE001 -- the audit is best-effort; a failure
+                # here must never take down the mandatory report_findings checkpoint.
+                schema_drift = None
+            state["schema_drift"] = schema_drift
+
         confidence_level, checked, total = compute_confidence(findings)
-        severity = compute_severity(confidence_level, findings)
+        severity = compute_severity(confidence_level, findings, schema_drift)
         state["severity"] = severity
         state["root_cause_urn"] = findings.root_cause_urn
+        # Everything build_card needs, captured at the moment the policy ran rather
+        # than re-asked of the model later, when it may have drifted.
+        state["findings"] = findings
+        state["confidence_level"] = confidence_level
+        state["checks_confirmed"] = checked
+        state["checks_total"] = total
+        state["dropped_inheritance"] = dropped
 
         checklist = "\n".join(
             f"{'✓' if getattr(findings, name) else '✗'} {label}"
             for name, label in _EVIDENCE_LABELS
         )
+        rejected = (
+            "Inheritance claims rejected (nothing recalled backs them; the checks were "
+            "reset to unconfirmed):\n" + "\n".join(f"  - {claim}" for claim in dropped) + "\n"
+            if dropped
+            else ""
+        )
+        mirrors_checked = (schema_drift or {}).get("mirrors_checked", [])
+        mirrors_stale = (schema_drift or {}).get("mirrors_stale", [])
+        if schema_drift is None:
+            drift_line = (
+                "Schema drift: not checked (no freshly-confirmed root-cause field "
+                "this run to check mirrors against).\n"
+            )
+        elif not mirrors_checked:
+            drift_line = (
+                "Schema drift: checked -- no same-entity mirrors found on other "
+                "platforms.\n"
+            )
+        else:
+            mirror_lines = "\n".join(
+                f"  - {m['platform']} ({m['urn']}): {m['status']}" for m in mirrors_checked
+            )
+            drift_line = (
+                f"Schema drift on `{schema_drift.get('checked_field')}` -- checked "
+                f"{len(mirrors_checked)} cross-platform mirror(s):\n{mirror_lines}\n"
+                + (
+                    f"  {len(mirrors_stale)} of {len(mirrors_checked)} running STALE "
+                    "schema -- they will keep producing the same symptom even after "
+                    "the root cause is fixed, until independently updated.\n"
+                    if mirrors_stale
+                    else "  All mirrors current.\n"
+                )
+            )
+
         return (
+            f"{rejected}"
             f"Root-cause confidence: {confidence_level.upper()} "
             f"({checked}/{total} evidence checks confirmed)\n"
             f"Evidence:\n{checklist}\n"
+            f"{drift_line}"
             f"Severity = f(confidence={confidence_level}, "
             f"affected_datasets={findings.affected_dataset_count}, "
             f"affected_dashboards={findings.affected_dashboard_count}, "
-            f"business_criticality={findings.business_criticality}) "
+            f"business_criticality={findings.business_criticality}, "
+            f"stale_mirrors={len(mirrors_stale)}) "
             f"= {severity}\n"
-            f"Authorized action: {SEVERITY_INSTRUCTIONS[severity]}"
+            f"Authorized action: {SEVERITY_INSTRUCTIONS[severity]}\n"
+            "Then call write_investigation_card (always -- it is never blocked, and a "
+            "refusal is exactly the case where recording what you learned matters most)."
         )
 
     return report_findings

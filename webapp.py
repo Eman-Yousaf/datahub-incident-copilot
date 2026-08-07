@@ -82,7 +82,7 @@ async def investigate(scenario: str) -> StreamingResponse:
             yield _sse(f"Incident Copilot investigating: {prompt!r}")
             seen = 0
             try:
-                async with datahub_tools() as tools:
+                async with datahub_tools(prompt) as tools:
                     agent = build_agent(tools)
                     async for state in agent.astream(
                         {"messages": [{"role": "user", "content": prompt}]},
