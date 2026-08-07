@@ -282,6 +282,20 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
     allowed = _MUTATION_ALLOWED_SEVERITIES[mcp_tool.name]
 
     async def gated_coroutine(*args, **kwargs):
+        # A model calling a single-URN/single-tag mutation sometimes passes a bare
+        # string instead of a one-item list for `entity_urns`/`tag_urns` -- observed
+        # live, not hypothetical. Left alone, `list(dict.fromkeys("urn:li:..."))`
+        # iterates the string's *characters*, corrupting both the authorization check
+        # (blocks on a nonsense "Not authorized: u, r, n, :, ..." message) and the
+        # actions-taken log. The underlying MCP tool accepts a real list just fine
+        # (confirmed by the model's own successful retry), so normalize in place here
+        # rather than let a shape mismatch silently misbehave -- same family as the
+        # `isinstance(content, str)` no-op and the response_format crash found
+        # earlier in this file.
+        for key in ("entity_urns", "tag_urns"):
+            if isinstance(kwargs.get(key), str):
+                kwargs[key] = [kwargs[key]]
+
         severity = state.get("severity")
         if severity is None:
             return _blocked(

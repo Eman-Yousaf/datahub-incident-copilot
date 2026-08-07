@@ -106,6 +106,24 @@ async def main():
     got = await gated("update_description", state).coroutine(entity_urn=ROOT, operation="append", description="x")
     expect("note appended to root cause -> allowed", got, False)
 
+    # --- observed live: a bare string instead of a one-item list for entity_urns/
+    # tag_urns must not corrupt the authorization check or the actions-taken log ---
+    state = {"severity": "tag_note_escalated", "root_cause_urn": ROOT}
+    before = len(ran)
+    got = await gated("add_tags", state).coroutine(tag_urns=FLAG, entity_urns=ROOT)
+    expect("bare-string entity_urns/tag_urns on the root cause -> allowed", got, False)
+
+    ok = len(ran) == before + 1 and ran[-1]["kwargs"]["entity_urns"] == [ROOT] and ran[-1]["kwargs"]["tag_urns"] == [FLAG]
+    print(f"{'PASS' if ok else 'FAIL'}  real tool received a real list, not iterated characters")
+    results.append(ok)
+
+    ok = any(FLAG in a and "u, r, n" not in a for a in state.get("actions_taken", []))
+    print(f"{'PASS' if ok else 'FAIL'}  actions_taken records the real tag, not split characters")
+    results.append(ok)
+
+    got = await gated("add_tags", state).coroutine(tag_urns=FLAG, entity_urns=UNRELATED)
+    expect("bare-string entity_urns on an unrelated entity -> still blocked", got, True)
+
     # --- no confirmed root cause: nothing is authorized, whatever the tier says ---
     got = await gated("add_tags", {"severity": "tag_note_escalated", "root_cause_urn": None}).coroutine(
         tag_urns=[FLAG], entity_urns=[ROOT])
