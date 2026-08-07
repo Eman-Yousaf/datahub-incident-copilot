@@ -220,13 +220,44 @@ _MUTATION_ALLOWED_SEVERITIES = {
 }
 
 
+def _authorized_targets(tool_name: str, state: dict) -> set[str]:
+    """The exact set of entities a mutation tool may touch this run, derived in
+    Python from what was actually confirmed -- never from the URNs the model asks
+    for.
+
+    Severity tiers answer "how much may I do"; they never answered "to what". That
+    gap was real: a run was observed tagging a mirror entity alongside the root
+    cause even though the authorization text said "the exact root-cause URN", and
+    `check_schema_drift` makes it likelier still by handing the model a list of other
+    live URNs. Prompt wording is not a control -- same reasoning as gating on
+    severity in code rather than asking nicely.
+
+    The root cause is where `report_findings` confirmed the signal. `add_tags` may
+    additionally flag mirrors `check_schema_drift` *proved* are running stale schema:
+    those are code-verified findings about those specific entities, so flagging them
+    is earned rather than assumed. `update_description` stays root-cause-only -- the
+    incident narrative belongs on the entity that caused it, not appended onto every
+    mirror that merely inherited the symptom.
+    """
+    root = state.get("root_cause_urn")
+    targets = {root} if root else set()
+    if tool_name == "add_tags":
+        targets |= {
+            mirror["urn"]
+            for mirror in (state.get("schema_drift") or {}).get("mirrors_stale", [])
+            if mirror.get("urn")
+        }
+    return targets
+
+
 def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
     """Wraps a mutation tool so it refuses to run until `report_findings` has
-    authorized a matching severity tier -- the enforced "do not act" path: this
-    check happens in code, so it can't be reasoned around by the model the way a
-    prompt instruction alone could be. On success, also re-fetches the entity via
-    get_entities so the result shows the mutation actually landed in DataHub,
-    instead of asking the judge to trust a bare `success: true`.
+    authorized a matching severity tier, and only on the entities this investigation
+    actually confirmed something about (see `_authorized_targets`) -- the enforced
+    "do not act" path: both checks happen in code, so they can't be reasoned around
+    by the model the way a prompt instruction alone could be. On success, also
+    re-fetches the entity via get_entities so the result shows the mutation actually
+    landed in DataHub, instead of asking the judge to trust a bare `success: true`.
     """
     original_coroutine = mcp_tool.coroutine
     allowed = _MUTATION_ALLOWED_SEVERITIES[mcp_tool.name]
@@ -245,13 +276,25 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
                     f"severity-high tag. {SEVERITY_INSTRUCTIONS[severity]}"
                 )
 
+        entity_urns = list(
+            dict.fromkeys(
+                kwargs.get("entity_urns")
+                or ([kwargs["entity_urn"]] if "entity_urn" in kwargs else [])
+            )
+        )
+        authorized = _authorized_targets(mcp_tool.name, state)
+        unauthorized = [urn for urn in entity_urns if urn not in authorized]
+        if unauthorized:
+            return (
+                f"Blocked: {mcp_tool.name} may only touch entities this investigation "
+                f"confirmed something about. Not authorized: {', '.join(unauthorized)}. "
+                f"Authorized this run: "
+                f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}."
+            )
+
         result = await original_coroutine(*args, **kwargs)
         content, artifact = result if isinstance(result, tuple) else (result, None)
         text = _extract_text(content)
-
-        entity_urns = kwargs.get("entity_urns") or (
-            [kwargs["entity_urn"]] if "entity_urn" in kwargs else []
-        )
 
         # Recorded from the call that actually got past the gate and ran, so the
         # Investigation Card's "actions taken" section reports what really happened to

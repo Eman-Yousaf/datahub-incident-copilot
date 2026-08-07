@@ -130,7 +130,11 @@ platforms_affected from your step-5 blast-radius results, and business_criticali
 
 7. WRITE-BACK: `report_findings`'s response tells you exactly what you're authorized to \
    do -- follow it literally, don't improvise a different tier. Target the exact \
-   root-cause URN, never a different "representative" node. If it says no_action (low \
+   root-cause URN, never a different "representative" node. The one exception: if \
+   check_schema_drift confirmed stale mirrors, `add_tags` (never update_description) may \
+   also flag those exact mirror URNs, since code verified they are genuinely stale. Any \
+   other entity is blocked in code, so don't try to widen the blast-radius write-back to \
+   downstream consumers. If it says no_action (low \
    confidence, or inconclusive), make NO write-back tool calls -- this is an enforced \
    stop, not a suggestion; attempting one will just be blocked. Each successful mutation \
    auto-verifies itself by re-reading the entity from DataHub -- you don't need to call \

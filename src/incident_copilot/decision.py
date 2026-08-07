@@ -63,7 +63,9 @@ SEVERITY_INSTRUCTIONS: dict[SeverityTier, str] = {
     "tag_note_escalated": (
         "You may call add_tags with BOTH 'urn:li:tag:incident-flagged' and "
         "'urn:li:tag:incident-severity-high', and update_description(operation="
-        "'append'), all on the exact root-cause URN."
+        "'append'), all on the exact root-cause URN. If check_schema_drift confirmed "
+        "stale mirrors, add_tags (not update_description) may also target those exact "
+        "mirror URNs -- any other entity is blocked."
     ),
 }
 
