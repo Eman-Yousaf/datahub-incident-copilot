@@ -136,6 +136,9 @@ That Do Real Work").
   trigger points used for the demo
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
 - `webapp.py` — FastAPI wrapper streaming the same agent to a browser via SSE
+- `tests/test_write_back_gate.py` — regression tests for the gate itself: what it blocks,
+  what it permits, and that a refusal returns in the shape LangChain demands rather than
+  crashing the run. `python tests/test_write_back_gate.py`, no live DataHub needed
 - `examples/` — unedited recorded investigation output
 
 Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those
