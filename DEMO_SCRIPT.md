@@ -51,10 +51,13 @@ Same command, same code, same prompt. Nothing changed except that memory now exi
 - The agent **skips the two checks already confirmed** and spends its calls only on what
   was missing. Call this out explicitly -- it is the "never starts from scratch" claim
   made visible.
-- `check_schema_drift` finds that **all three cross-platform mirrors of the table --
-  snowflake, looker, powerbi -- are running stale schema.** This is the beat worth
-  slowing down for: DataHub's lineage shows those as connected and has no way to tell you
-  they disagree on shape. Those mirrors keep producing the symptom even after the root
+- Watch for the schema-drift finding folded into `report_findings`' own output --
+  **all three cross-platform mirrors of the table -- snowflake, looker, powerbi -- are
+  running stale schema.** This is the beat worth slowing down for: DataHub's lineage
+  shows those as connected and has no way to tell you they disagree on shape. It's not
+  the agent's choice whether to check this -- `report_findings` runs the audit itself
+  the moment it has a confirmed root cause and field name, so this beat can't get
+  skipped on the take. Those mirrors keep producing the symptom even after the root
   cause is fixed.
 - 4/4 → HIGH → `tag_note_escalated` → tags and an incident note are written, then
   **re-read back out of DataHub** to prove they actually landed.

@@ -91,13 +91,15 @@ table replicated onto another platform can silently keep the old schema after th
 changes shape, and the graph keeps drawing the same edge either way — an edge asserts
 connectivity, never parity.
 
-So `check_schema_drift` asks the question the graph doesn't: it walks two hops in both
-directions, name-matches same-entity siblings across platforms, and confirms field-by-field
-whether each one actually picked up the change. On DataHub's own showcase-ecommerce
-datapack, the dbt `order_details` model has three such mirrors — snowflake, looker,
-powerbi — and **all three were running stale schema**. Only the snowflake copy is a 1-hop
-sync; the other two read from *that* copy, so a 1-hop check would have missed two of the
-three real findings.
+So `report_findings` asks the question the graph doesn't, automatically: whenever it has a
+confirmed root cause and the field that changed, it walks two hops in both directions,
+name-matches same-entity siblings across platforms, and confirms field-by-field whether
+each one actually picked up the change — the same demotion-not-request pattern as the rest
+of this table, not a tool the agent has to remember to reach for. On DataHub's own
+showcase-ecommerce datapack, the dbt `order_details` model has three such mirrors —
+snowflake, looker, powerbi — and **all three were running stale schema**. Only the
+snowflake copy is a 1-hop sync; the other two read from *that* copy, so a 1-hop check
+would have missed two of the three real findings.
 
 This matters operationally: those mirrors keep producing the same symptom after the root
 cause is fixed, until someone updates them independently. Two or more confirmed-stale
@@ -126,7 +128,8 @@ That Do Real Work").
   taken, and auto-verifies successful write-backs by re-reading the entity
 - `src/incident_copilot/mirror_audit.py` — the cross-platform schema-drift check: finds
   same-entity mirrors via lineage and confirms in code whether each still has the changed
-  field, so the agent can never merely assert that one is stale
+  field. Run automatically by `report_findings`, not on the agent's initiative, so the
+  agent can never merely assert a mirror is stale, or skip the check by not asking
 - `src/incident_copilot/agent.py` — the agent loop, bound to DataHub's MCP tools; it
   chooses its own investigation path rather than following a fixed script — three incident
   shapes take three verifiably different paths through the same code
@@ -138,7 +141,11 @@ That Do Real Work").
 - `webapp.py` — FastAPI wrapper streaming the same agent to a browser via SSE
 - `tests/test_write_back_gate.py` — regression tests for the gate itself: what it blocks,
   what it permits, and that a refusal returns in the shape LangChain demands rather than
-  crashing the run. `python tests/test_write_back_gate.py`, no live DataHub needed
+  crashing the run
+- `tests/test_report_findings_drift.py` — regression tests for the automatic schema-drift
+  audit: when it runs, when it cleanly stays off, and that a malformed tool response can't
+  crash the mandatory `report_findings` checkpoint. Both test files run with
+  `python tests/test_*.py`, no live DataHub needed
 - `examples/` — unedited recorded investigation output
 
 Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those

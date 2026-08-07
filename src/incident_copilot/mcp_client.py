@@ -15,7 +15,6 @@ from .decision import SEVERITY_INSTRUCTIONS, build_card, build_report_findings_t
 from .mcp_util import extract_text as _extract_text
 from .mcp_util import with_text as _with_text
 from .memory import build_recall_tool, build_write_card_tool
-from .mirror_audit import build_mirror_audit_tool
 
 
 def build_mcp_client() -> MultiServerMCPClient:
@@ -228,16 +227,16 @@ def _authorized_targets(tool_name: str, state: dict) -> set[str]:
     Severity tiers answer "how much may I do"; they never answered "to what". That
     gap was real: a run was observed tagging a mirror entity alongside the root
     cause even though the authorization text said "the exact root-cause URN", and
-    `check_schema_drift` makes it likelier still by handing the model a list of other
-    live URNs. Prompt wording is not a control -- same reasoning as gating on
-    severity in code rather than asking nicely.
+    the schema-drift audit makes it likelier still by surfacing a list of other live
+    URNs in report_findings' own output. Prompt wording is not a control -- same
+    reasoning as gating on severity in code rather than asking nicely.
 
     The root cause is where `report_findings` confirmed the signal. `add_tags` may
-    additionally flag mirrors `check_schema_drift` *proved* are running stale schema:
-    those are code-verified findings about those specific entities, so flagging them
-    is earned rather than assumed. `update_description` stays root-cause-only -- the
-    incident narrative belongs on the entity that caused it, not appended onto every
-    mirror that merely inherited the symptom.
+    additionally flag mirrors the automatic schema-drift audit *proved* are running
+    stale schema: those are code-verified findings about those specific entities, so
+    flagging them is earned rather than assumed. `update_description` stays
+    root-cause-only -- the incident narrative belongs on the entity that caused it,
+    not appended onto every mirror that merely inherited the symptom.
     """
     root = state.get("root_cause_urn")
     targets = {root} if root else set()
@@ -390,10 +389,9 @@ async def datahub_tools(incident_report: str = ""):
                 _gate_mutation_tool(tool, decision_state, get_entities_tool)
             _wrap_with_provenance(tool, decision_state)
 
-        filtered.append(build_report_findings_tool(decision_state))
         filtered.append(
-            build_mirror_audit_tool(
-                decision_state, by_name["get_lineage"], by_name["list_schema_fields"]
+            build_report_findings_tool(
+                decision_state, by_name.get("get_lineage"), by_name.get("list_schema_fields")
             )
         )
 

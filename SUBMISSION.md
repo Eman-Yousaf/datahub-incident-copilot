@@ -61,15 +61,19 @@ inside DataHub that the next investigation reads and continues from.
   `_authorized_targets` now derives the permitted set in Python: the confirmed root cause,
   plus — for tagging only — mirrors the drift check *proved* stale. Everything else is
   refused before the tool runs.
-- **Finds what the lineage graph structurally cannot tell you.** DataHub's lineage is
-  topologically honest but schema-blind: an edge asserts that two datasets are connected,
-  never that they agree on shape. `check_schema_drift` walks two hops in both directions,
-  name-matches the same real-world table across platforms, and confirms field-by-field
-  whether each mirror actually picked up the change. On DataHub's own showcase-ecommerce
-  datapack, all three mirrors of the dbt `order_details` model — snowflake, looker, powerbi
-  — were running stale schema, and two of the three are only reachable at 2 hops. They keep
-  producing the same symptom after the root cause is fixed. The agent supplies the entity
-  and field; the verdict is established by real tool calls in code, never asserted.
+- **Finds what the lineage graph structurally cannot tell you — automatically, not on the
+  model's initiative.** DataHub's lineage is topologically honest but schema-blind: an edge
+  asserts that two datasets are connected, never that they agree on shape.
+  `report_findings` runs this check itself, in code, the instant it has a confirmed root
+  cause and the field that changed — it used to be a tool the agent could choose to call or
+  skip, but a finding this central to the pitch can't depend on the model remembering to
+  ask for it. It walks two hops in both directions, name-matches the same real-world table
+  across platforms, and confirms field-by-field whether each mirror actually picked up the
+  change. On DataHub's own showcase-ecommerce datapack, all three mirrors of the dbt
+  `order_details` model — snowflake, looker, powerbi — were running stale schema, and two
+  of the three are only reachable at 2 hops. They keep producing the same symptom after the
+  root cause is fixed. The agent supplies only the field name; the verdict is established
+  by real tool calls in code, never asserted.
 - **Inherited evidence is verified, not taken on faith.** A run that claims it carried a
   check forward from a prior card has that claim checked against the cards recall actually
   returned. An unbacked claim resets the check to unconfirmed — lowering confidence, and

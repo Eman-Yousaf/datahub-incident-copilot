@@ -16,16 +16,18 @@ copy rather than from dbt directly, so they only show up at 2 hops -- checking 1
 only would silently miss two of the three real, live-confirmed stale mirrors. DataHub's
 lineage never surfaces any of this on its own.
 
-Built the same way as memory.py's recall/write-card tools: this does its own real tool
-calls and writes the verdict into `state` in Python. The agent supplies which entity
-and which field to check; it never gets to claim mirrors are stale (or current) on its
-own word -- report_findings and the Investigation Card only ever see what this module
-actually found.
+`audit_schema_drift` is called automatically from decision.py's `report_findings` --
+it is not a tool the agent chooses to call. It used to be (`check_schema_drift`,
+callable "optionally, at most once"), but a finding this central to the pitch can't
+depend on the model remembering to ask for it: same reasoning as every other gate in
+this project (severity, write-back targets, inherited evidence) -- an instruction the
+model usually follows is not a control. The agent's only remaining input is the field
+name it confirmed via SIGNAL (`Findings.changed_field_path`); Python decides whether
+and how the audit runs, and the agent never gets to claim mirrors are stale (or
+current) on its own word.
 """
 
 import re
-
-from langchain_core.tools import tool
 
 from .mcp_util import result_json
 
@@ -86,81 +88,58 @@ async def _field_status(list_schema_fields_tool, mirror_urn: str, field_path: st
     return "current" if any(f.get("fieldPath") == field_path for f in fields) else "stale"
 
 
-def build_mirror_audit_tool(state: dict, get_lineage_tool, list_schema_fields_tool):
-    """Returns `check_schema_drift`, bound to `state` (the same shared dict
-    report_findings/build_card read from). Not gated: it performs no mutation, so
-    it's callable any time, like get_lineage itself.
+async def audit_schema_drift(
+    get_lineage_tool, list_schema_fields_tool, entity_urn: str, field_path: str
+) -> dict:
+    """Find same-real-world-entity mirrors of `entity_urn` on OTHER platforms (via
+    lineage within 2 hops, both directions) and confirm field-by-field whether each
+    still has `field_path`. Read-only -- never mutates anything.
+
+    Returns `{"checked_field", "root_urn", "mirrors_checked", "mirrors_stale"}`, the
+    exact shape `state["schema_drift"]` holds. `mirrors_checked` is `[]` (not an
+    error) when this entity simply has no name-matched sibling on another platform
+    within 2 hops.
     """
+    own_name = _normalized_leaf_name(entity_urn)
+    neighbors = (
+        await _lineage_neighbors(get_lineage_tool, entity_urn, upstream=True)
+    ) + (
+        await _lineage_neighbors(get_lineage_tool, entity_urn, upstream=False)
+    )
 
-    @tool
-    async def check_schema_drift(entity_urn: str, field_path: str) -> str:
-        """Check whether same-real-world-entity mirrors of `entity_urn` on OTHER
-        platforms (found via lineage within 2 hops, both directions) still have
-        `field_path`. Call this after confirming a root cause and the specific field
-        that changed (step 2 SIGNAL), before report_findings. Read-only -- never
-        mutates anything. Not required, but strengthens the blast-radius picture with
-        a concrete, code-verified fact: DataHub's lineage shows these mirrors as
-        connected, but never tells you whether they're running the same schema."""
-        own_name = _normalized_leaf_name(entity_urn)
-        neighbors = (
-            await _lineage_neighbors(get_lineage_tool, entity_urn, upstream=True)
-        ) + (
-            await _lineage_neighbors(get_lineage_tool, entity_urn, upstream=False)
-        )
+    seen: dict[str, dict] = {}
+    for entity in neighbors:
+        urn = entity["urn"]
+        if urn == entity_urn or urn in seen:
+            continue
+        entity_type = (entity.get("type") or "").upper()
+        if entity_type and entity_type != "DATASET":
+            continue
+        if _normalized_leaf_name(entity.get("name") or urn) != own_name:
+            continue
+        seen[urn] = entity
 
-        seen: dict[str, dict] = {}
-        for entity in neighbors:
-            urn = entity["urn"]
-            if urn == entity_urn or urn in seen:
-                continue
-            entity_type = (entity.get("type") or "").upper()
-            if entity_type and entity_type != "DATASET":
-                continue
-            if _normalized_leaf_name(entity.get("name") or urn) != own_name:
-                continue
-            seen[urn] = entity
-
-        if not seen:
-            state["schema_drift"] = {
-                "checked_field": field_path,
-                "root_urn": entity_urn,
-                "mirrors_checked": [],
-                "mirrors_stale": [],
-            }
-            return (
-                f"No same-entity cross-platform mirrors found for {entity_urn} within "
-                "2 hops of lineage. Not an error -- this entity simply has no "
-                "name-matched sibling on another platform to check."
-            )
-
-        checked: list[dict] = []
-        stale: list[dict] = []
-        for urn, entity in seen.items():
-            platform = (entity.get("platform") or {}).get("name", "unknown")
-            status = await _field_status(list_schema_fields_tool, urn, field_path)
-            record = {"urn": urn, "platform": platform, "status": status}
-            checked.append(record)
-            if status == "stale":
-                stale.append(record)
-
-        state["schema_drift"] = {
+    if not seen:
+        return {
             "checked_field": field_path,
             "root_urn": entity_urn,
-            "mirrors_checked": checked,
-            "mirrors_stale": stale,
+            "mirrors_checked": [],
+            "mirrors_stale": [],
         }
 
-        lines = [f"Checked {len(checked)} cross-platform mirror(s) of this entity for '{field_path}':"]
-        for record in checked:
-            lines.append(f"  - {record['platform']} ({record['urn']}): {record['status']}")
-        if stale:
-            lines.append(
-                f"\n{len(stale)} of {len(checked)} mirror(s) are running on STALE schema -- "
-                "they will keep producing the same symptom even after the root cause is "
-                f"fixed on {entity_urn}, until they're independently updated."
-            )
-        else:
-            lines.append("\nAll mirrors are current with this field.")
-        return "\n".join(lines)
+    checked: list[dict] = []
+    stale: list[dict] = []
+    for urn, entity in seen.items():
+        platform = (entity.get("platform") or {}).get("name", "unknown")
+        status = await _field_status(list_schema_fields_tool, urn, field_path)
+        record = {"urn": urn, "platform": platform, "status": status}
+        checked.append(record)
+        if status == "stale":
+            stale.append(record)
 
-    return check_schema_drift
+    return {
+        "checked_field": field_path,
+        "root_urn": entity_urn,
+        "mirrors_checked": checked,
+        "mirrors_stale": stale,
+    }

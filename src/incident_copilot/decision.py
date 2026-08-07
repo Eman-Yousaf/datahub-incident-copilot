@@ -39,6 +39,7 @@ from .memory import (
     confirmed_evidence_keys,
     new_incident_id,
 )
+from .mirror_audit import audit_schema_drift
 
 SeverityTier = Literal["no_action", "tag_only", "tag_and_note", "tag_note_escalated"]
 
@@ -63,9 +64,9 @@ SEVERITY_INSTRUCTIONS: dict[SeverityTier, str] = {
     "tag_note_escalated": (
         "You may call add_tags with BOTH 'urn:li:tag:incident-flagged' and "
         "'urn:li:tag:incident-severity-high', and update_description(operation="
-        "'append'), all on the exact root-cause URN. If check_schema_drift confirmed "
-        "stale mirrors, add_tags (not update_description) may also target those exact "
-        "mirror URNs -- any other entity is blocked."
+        "'append'), all on the exact root-cause URN. If report_findings' automatic "
+        "cross-platform check found stale mirrors, add_tags (not update_description) "
+        "may also target those exact mirror URNs -- any other entity is blocked."
     ),
 }
 
@@ -164,6 +165,17 @@ class Findings(BaseModel):
         "its incident_id (e.g. 'INC-20260803-141522'). None if this is a fresh "
         "investigation with no usable prior card.",
     )
+    changed_field_path: str | None = Field(
+        default=None,
+        description="The exact fieldPath you confirmed in step 2 SIGNAL as the field "
+        "that changed and explains the symptom -- e.g. 'order_status_detail'. Set "
+        "this whenever outcome is 'root_cause_found' and SIGNAL was confirmed via a "
+        "schema field this run (the normal case): it automatically triggers a "
+        "cross-platform check for same-entity mirrors on other platforms running "
+        "stale schema. Leave it None only when the root cause came purely from a "
+        "prior Investigation Card with no fresh field name of your own this run, or "
+        "when outcome is 'inconclusive'.",
+    )
 
 
 _EVIDENCE_KEYS = frozenset(name for name, _ in _EVIDENCE_LABELS)
@@ -241,12 +253,14 @@ def compute_severity(
     model makes freely. Low confidence (or inconclusive) always routes to no_action:
     uncertainty means a human reviews it, the agent doesn't act on a guess.
 
-    `schema_drift` is `state["schema_drift"]` from mirror_audit.py's check_schema_drift
-    tool (None if that optional check was never run this investigation) -- two or more
-    confirmed-stale mirrors is a real, code-verified signal of ongoing risk beyond the
-    blast-radius count alone, so it's one more OR-condition on the same escalation
-    tier. Every existing condition and return path here is unchanged; the default
-    `None` makes this a no-op for any run that didn't call the check.
+    `schema_drift` is `state["schema_drift"]`, populated automatically inside
+    `report_findings` (see `audit_schema_drift` in mirror_audit.py) whenever a root
+    cause and a freshly-confirmed field name are both available -- None if there was
+    nothing to audit this run (inconclusive outcome, or no fresh field name). Two or
+    more confirmed-stale mirrors is a real, code-verified signal of ongoing risk
+    beyond the blast-radius count alone, so it's one more OR-condition on the same
+    escalation tier. Every existing condition and return path here is unchanged; the
+    default `None` makes this a no-op whenever there was nothing to check.
     """
     if findings.outcome == "inconclusive" or confidence_level == "low":
         return "no_action"
@@ -359,26 +373,57 @@ def build_card(state: dict) -> InvestigationCard:
     )
 
 
-def build_report_findings_tool(state: dict):
+def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_fields_tool=None):
     """Returns the report_findings tool, bound to `state` (a plain dict shared with
     mcp_client.py's mutation-tool gate). Calling this tool is how the agent's
     self-reported evidence becomes the code-computed severity that gates write-back.
+
+    Also runs the cross-platform schema-drift audit itself, whenever there's enough
+    to run it on. This used to be a separate tool (`check_schema_drift`) the agent
+    could choose to call or skip -- but a finding this central to the pitch can't
+    depend on the model remembering to ask for it. `get_lineage_tool`/
+    `list_schema_fields_tool` are the raw MCP tools `audit_schema_drift` needs; if
+    either is unavailable, the audit is silently skipped rather than failing the
+    mandatory checkpoint.
     """
 
     @tool(args_schema=Findings)
-    def report_findings(**kwargs) -> str:
+    async def report_findings(**kwargs) -> str:
         """Call this exactly once, after you've either confirmed a root cause or
         concluded inconclusive, and BEFORE any add_tags/update_description call.
         Reports your evidence checklist honestly (only mark an item TRUE if a tool
         call actually confirmed it). Confidence and the write-back tier you're
         authorized to use are computed from your answers, not decided by you --
-        add_tags/update_description will refuse to run until you've called this."""
+        add_tags/update_description will refuse to run until you've called this. If
+        you confirmed a root cause via a specific schema field this run (the normal
+        case), report it in changed_field_path -- this automatically checks whether
+        same-entity mirrors on other platforms are running stale schema."""
         findings = Findings(**kwargs)
         # Verify inheritance claims BEFORE the arithmetic runs, so an unbacked claim
         # can't buy confidence it didn't earn.
         dropped = validate_inheritance(findings, state)
+
+        schema_drift: dict | None = None
+        if (
+            findings.outcome == "root_cause_found"
+            and findings.root_cause_urn
+            and findings.changed_field_path
+            and get_lineage_tool is not None
+            and list_schema_fields_tool is not None
+        ):
+            try:
+                schema_drift = await audit_schema_drift(
+                    get_lineage_tool,
+                    list_schema_fields_tool,
+                    findings.root_cause_urn,
+                    findings.changed_field_path,
+                )
+            except Exception:  # noqa: BLE001 -- the audit is best-effort; a failure
+                # here must never take down the mandatory report_findings checkpoint.
+                schema_drift = None
+            state["schema_drift"] = schema_drift
+
         confidence_level, checked, total = compute_confidence(findings)
-        schema_drift = state.get("schema_drift")
         severity = compute_severity(confidence_level, findings, schema_drift)
         state["severity"] = severity
         state["root_cause_urn"] = findings.root_cause_urn
@@ -404,19 +449,28 @@ def build_report_findings_tool(state: dict):
         mirrors_stale = (schema_drift or {}).get("mirrors_stale", [])
         if schema_drift is None:
             drift_line = (
-                "Schema drift: not checked this run (optional -- call "
-                "check_schema_drift if a same-entity mirror on another platform "
-                "might be running stale schema).\n"
+                "Schema drift: not checked (no freshly-confirmed root-cause field "
+                "this run to check mirrors against).\n"
             )
         elif not mirrors_checked:
             drift_line = (
-                "Schema drift: check_schema_drift ran but found no same-entity "
-                "mirrors to check.\n"
+                "Schema drift: checked -- no same-entity mirrors found on other "
+                "platforms.\n"
             )
         else:
+            mirror_lines = "\n".join(
+                f"  - {m['platform']} ({m['urn']}): {m['status']}" for m in mirrors_checked
+            )
             drift_line = (
-                f"Schema drift: {len(mirrors_stale)} of {len(mirrors_checked)} "
-                f"same-entity mirror(s) stale on `{schema_drift.get('checked_field')}`.\n"
+                f"Schema drift on `{schema_drift.get('checked_field')}` -- checked "
+                f"{len(mirrors_checked)} cross-platform mirror(s):\n{mirror_lines}\n"
+                + (
+                    f"  {len(mirrors_stale)} of {len(mirrors_checked)} running STALE "
+                    "schema -- they will keep producing the same symptom even after "
+                    "the root cause is fixed, until independently updated.\n"
+                    if mirrors_stale
+                    else "  All mirrors current.\n"
+                )
             )
 
         return (
