@@ -205,6 +205,13 @@ def _wrap_with_provenance(tool, state: dict):
 
     async def tracked_coroutine(*args, **kwargs):
         state.setdefault("tools_used", set()).add(tool.name)
+        # A running tally of real DataHub API calls. Every tool wrapped here goes
+        # over MCP to GMS, including the ones the automatic drift audit makes on
+        # the agent's behalf -- those objects are the same wrapped instances, so
+        # the count includes work the model never explicitly asked for, which is
+        # the honest number. Appended after the call would undercount a failure;
+        # appended before, it reflects what was actually attempted.
+        state.setdefault("datahub_calls", []).append(tool.name)
         return await original_coroutine(*args, **kwargs)
 
     tool.coroutine = tracked_coroutine

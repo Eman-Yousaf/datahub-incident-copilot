@@ -108,12 +108,16 @@ def _evidence(state: dict) -> list[dict[str, Any]]:
     `report_findings` has actually run."""
     findings = state.get("findings")
     inherited = set(getattr(findings, "inherited_evidence", None) or ())
+    sources = state.get("inheritance_sources") or {}
     return [
         {
             "key": key,
             "label": label,
             "confirmed": bool(getattr(findings, key, False)) if findings else False,
             "inherited": key in inherited and bool(getattr(findings, key, False)),
+            # Which stored investigation proved it, when it wasn't proved here.
+            # An attributable claim can be checked; a bare "inherited" can't.
+            "source": sources.get(key) if key in inherited else None,
             "reported": findings is not None,
         }
         for key, label in EVIDENCE_LABELS
@@ -195,6 +199,10 @@ def snapshot(state: dict) -> dict[str, Any]:
                 }
                 for card in prior
             ],
+            # Prior knowledge re-tested against the live graph. Surfaced as its own
+            # list because a CONFLICT is the most important thing this panel can
+            # report: the agent declining to trust its own memory.
+            "validation": list(state.get("prior_validation") or []),
             "continues": getattr(findings, "continues_incident_id", None),
             "reused_checks": len(
                 [
@@ -231,4 +239,51 @@ def snapshot(state: dict) -> dict[str, Any]:
         "write_back": _write_back(state),
         "card_urn": state.get("card_urn"),
         "tools_used": sorted(state.get("tools_used") or ()),
+        # Real DataHub API traffic, not a decorative counter: every entry is one
+        # MCP call that reached GMS this run.
+        "datahub_calls": {
+            "total": len(state.get("datahub_calls") or []),
+            "by_tool": _call_breakdown(state),
+        },
+        "knowledge": _knowledge(state),
+    }
+
+
+def _call_breakdown(state: dict) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for name in state.get("datahub_calls") or []:
+        counts[name] = counts.get(name, 0) + 1
+    return [
+        {"tool": name, "count": count}
+        for name, count in sorted(counts.items(), key=lambda row: -row[1])
+    ]
+
+
+def _knowledge(state: dict) -> dict[str, Any]:
+    """What this run leaves behind for the next one.
+
+    The closing claim of the whole project is that an investigation compounds
+    rather than evaporating, so it should be stated in countable terms: how many
+    checks this run proved itself, how many it didn't have to redo, and how many
+    the next investigation of this incident will find already established. All
+    three are read off the same evidence the policy layer scored -- no separate
+    bookkeeping that could drift away from it.
+    """
+    findings = state.get("findings")
+    if findings is None:
+        return {"stored": False, "proved_here": 0, "reused": 0, "available_next_run": 0}
+
+    inherited = set(findings.inherited_evidence or [])
+    confirmed = [key for key, _ in EVIDENCE_LABELS if getattr(findings, key, False)]
+    return {
+        "stored": bool(state.get("card_urn")),
+        "card_urn": state.get("card_urn"),
+        "incident_id": state.get("incident_id"),
+        "proved_here": len([key for key in confirmed if key not in inherited]),
+        "reused": len([key for key in confirmed if key in inherited]),
+        # A refusal stores a card too, so even a run that proved nothing still
+        # records what was missing -- which is the thing that lets the next run
+        # skip straight to it.
+        "available_next_run": len(confirmed),
+        "continues": findings.continues_incident_id,
     }

@@ -21,8 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from incident_copilot.decision import Findings, build_report_findings_tool  # noqa: E402
-from incident_copilot.mcp_client import _gate_mutation_tool  # noqa: E402
+from incident_copilot.decision import build_report_findings_tool  # noqa: E402
+from incident_copilot.mcp_client import _gate_mutation_tool, _wrap_with_provenance  # noqa: E402
+from incident_copilot.memory import EvidenceItem, InvestigationCard  # noqa: E402
 from incident_copilot.panel import snapshot  # noqa: E402
 
 ROOT = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.ORDER_ENTRY_DB.analytics.order_details,PROD)"
@@ -173,6 +174,82 @@ async def main():
     check(
         "the demoted check renders as unconfirmed",
         not next(e for e in snap["evidence"] if e["key"] == "evidence_lineage_confirms_path")["confirmed"],
+    )
+
+    # ---- a genuinely-backed inheritance is attributed to its source card ------
+    older = InvestigationCard(
+        incident_id="INC-20260101-000000",
+        timestamp="2026-01-01T00:00:00+00:00",
+        trigger="t",
+        evidence=[
+            EvidenceItem(
+                key="evidence_lineage_confirms_path",
+                label="Lineage path confirmed via get_lineage",
+                confirmed=True,
+            )
+        ],
+    )
+    newer = InvestigationCard(
+        incident_id="INC-20260202-000000",
+        timestamp="2026-02-02T00:00:00+00:00",
+        trigger="t",
+        evidence=[
+            EvidenceItem(
+                key="evidence_lineage_confirms_path",
+                label="Lineage path confirmed via get_lineage",
+                confirmed=True,
+            )
+        ],
+    )
+    continued: dict = {"trigger": "t", "prior_cards": [older, newer]}
+    await build_report_findings_tool(continued).coroutine(
+        outcome="root_cause_found",
+        root_cause_urn=ROOT,
+        root_cause_summary="continues an earlier run",
+        evidence_recent_schema_change=True,
+        evidence_field_matches_symptom=True,
+        evidence_lineage_confirms_path=True,
+        evidence_downstream_confirmed=False,
+        inherited_evidence=["evidence_lineage_confirms_path"],
+    )
+    snap = snapshot(continued)
+    lineage_check = next(e for e in snap["evidence"] if e["key"] == "evidence_lineage_confirms_path")
+
+    check("a backed inheritance claim survives", lineage_check["confirmed"] and lineage_check["inherited"])
+    check(
+        "the inherited check names the card that proved it",
+        lineage_check["source"] == "INC-20260202-000000",
+    )
+    check(
+        "attribution picks the most recent card, not just any",
+        lineage_check["source"] != "INC-20260101-000000",
+    )
+    check(
+        "a check proved this run carries no borrowed attribution",
+        next(e for e in snap["evidence"] if e["key"] == "evidence_recent_schema_change")["source"] is None,
+    )
+
+    knowledge = snap["knowledge"]
+    check("knowledge counts what this run proved itself", knowledge["proved_here"] == 2)
+    check("knowledge counts what it reused instead of re-running", knowledge["reused"] == 1)
+    check(
+        "knowledge counts everything the next run can inherit",
+        knowledge["available_next_run"] == 3,
+    )
+    check("knowledge reports the card as unstored until it really is", knowledge["stored"] is False)
+
+    # ---- DataHub call traffic is counted, not estimated ----------------------
+    counted: dict = {"trigger": "t"}
+    tool = FakeTool("get_lineage")
+    _wrap_with_provenance(tool, counted)
+    await tool.coroutine()
+    await tool.coroutine()
+    snap = snapshot(counted)
+
+    check("every DataHub tool call is counted", snap["datahub_calls"]["total"] == 2)
+    check(
+        "...and broken down by tool",
+        snap["datahub_calls"]["by_tool"] == [{"tool": "get_lineage", "count": 2}],
     )
 
     print(f"\n{sum(results)}/{len(results)} passed")

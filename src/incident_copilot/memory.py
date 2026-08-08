@@ -121,6 +121,12 @@ class InvestigationCard(BaseModel):
     root_cause_summary: str = ""
     outcome: str = "inconclusive"
 
+    # The specific field this run identified as the cause. Recorded so a future
+    # investigation can re-test the claim against live DataHub instead of taking
+    # the card's word for it (see revalidate.py) -- a card is a true record of
+    # when it was written, not a standing fact about the graph.
+    root_cause_field: str | None = None
+
     evidence: list[EvidenceItem] = Field(default_factory=list)
     hypotheses_tested: list[str] = Field(default_factory=list)
     hypotheses_rejected: list[str] = Field(default_factory=list)
@@ -178,6 +184,24 @@ def confirmed_evidence_keys(cards: list[InvestigationCard]) -> set[str]:
     return {
         item.key for card in cards for item in card.evidence if item.confirmed
     }
+
+
+def confirmed_evidence_sources(cards: list[InvestigationCard]) -> dict[str, str]:
+    """Which prior investigation established each already-confirmed check.
+
+    `confirmed_evidence_keys` answers "is this backed?", which is all the policy
+    layer needs to accept or reject an inheritance claim. This answers "backed by
+    whom?", which is what makes the claim legible to a person: "skipped — already
+    proven by INC-20260807-194935" is a checkable statement, where a bare
+    "inherited" badge asks to be taken on faith. Cards are consulted newest-first
+    so the attribution names the most recent run that proved it.
+    """
+    sources: dict[str, str] = {}
+    for card in sorted(cards, key=lambda c: c.timestamp, reverse=True):
+        for item in card.evidence:
+            if item.confirmed:
+                sources.setdefault(item.key, card.incident_id)
+    return sources
 
 
 def new_incident_id(now: datetime | None = None) -> str:

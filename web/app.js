@@ -127,6 +127,10 @@ async function viewCommandCenter() {
   const actions = cards.length - refusals;
   const continued = cards.filter((c) => c.continues_incident_id).length;
   const catalog = status.catalog || {};
+  // Verified knowledge = evidence checks that stored investigations actually
+  // confirmed. Counted off the cards themselves rather than tracked separately,
+  // so the headline number can never drift from what the cards say.
+  const verified = cards.reduce((n, c) => n + c.evidence.filter((e) => e.confirmed).length, 0);
 
   setView(`
     <div class="page-head fade-in">
@@ -157,6 +161,11 @@ async function viewCommandCenter() {
         <div class="stat-value">${continued}</div>
         <div class="stat-label">Runs that continued a prior one</div>
         <div class="stat-note">inherited evidence</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="color:var(--purple)">${verified}</div>
+        <div class="stat-label">Verified knowledge</div>
+        <div class="stat-note">confirmed checks, re-tested on reuse</div>
       </div>
     </div>
 
@@ -277,9 +286,12 @@ async function viewRun(scenario) {
         <span class="chip chip-accent" id="run-state">ready</span>
         <span class="chip">${h(inc.shape)}</span>
         <span class="chip">${inc.investigation_count} prior investigation${inc.investigation_count === 1 ? '' : 's'}</span>
+        <span class="chip chip-accent" id="dh-calls" title="Real MCP calls to DataHub's GMS this run">◈ 0 DataHub calls</span>
         <button class="btn btn-primary btn-sm" id="start-run">▶ Run investigation</button>
       </div>
     </div>
+
+    <div id="memory-moment"></div>
 
     <div class="workspace">
       <div>
@@ -330,6 +342,9 @@ function startRun(scenario) {
     try {
       lastState = JSON.parse(e.data);
       $('#panel').innerHTML = panelHtml(lastState);
+      renderMemoryMoment(lastState);
+      const calls = lastState.datahub_calls || { total: 0 };
+      $('#dh-calls').textContent = `◈ ${calls.total} DataHub call${calls.total === 1 ? '' : 's'}`;
     } catch (err) { /* a malformed frame must not kill the stream */ }
   });
 
@@ -357,6 +372,99 @@ function startRun(scenario) {
   };
 }
 
+/* The memory moment.
+ *
+ * This is the beat the whole project is built around, so it gets its own banner
+ * above the fold rather than a line in a side panel: before touching DataHub, the
+ * agent finds what previous investigations of this incident already established,
+ * and continues from there. Rendered only from cards `recall_prior_investigations`
+ * genuinely returned — when there are none, it says so plainly, because "starting
+ * cold" is the honest and equally interesting half of the story. */
+function renderMemoryMoment(s) {
+  const target = $('#memory-moment');
+  if (!target) return;
+  const mem = s.memory || { prior_cards: [] };
+  const phase = (s.phases || []).find((p) => p.key === 'recall');
+  if (!phase || !phase.done) { target.innerHTML = ''; return; }
+
+  if (mem.prior_cards.length === 0) {
+    target.innerHTML = `
+      <div class="banner fade-in" style="margin-bottom:16px">
+        <span class="banner-icon">◷</span>
+        <div>
+          <b>No prior investigation of this incident.</b>
+          <p class="sub" style="font-size:12.5px;margin-top:4px">Starting cold — every check
+          has to be established from scratch. Whatever this run proves gets written back to
+          DataHub, so the next one won't have to.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const confirmed = [];
+  mem.prior_cards.forEach((c) => (c.confirmed || []).forEach((label) => {
+    if (!confirmed.some((x) => x.label === label)) confirmed.push({ label, from: c.incident_id });
+  }));
+  const stillMissing = [];
+  mem.prior_cards.forEach((c) => (c.missing || []).forEach((label) => {
+    if (!confirmed.some((x) => x.label === label) && !stillMissing.includes(label)) stillMissing.push(label);
+  }));
+
+  target.innerHTML = `
+    <div class="banner banner-memory fade-in" style="margin-bottom:16px">
+      <span class="banner-icon">◈</span>
+      <div style="flex:1;min-width:0">
+        <b>Prior verified knowledge found in DataHub.</b>
+        <p class="sub" style="font-size:12.5px;margin-top:4px">
+          ${mem.prior_cards.length} stored investigation${mem.prior_cards.length === 1 ? '' : 's'}
+          of this incident. This run continues from ${mem.prior_cards.length === 1 ? 'it' : 'them'}
+          rather than starting over — and any check it inherits is verified against those cards
+          before it counts.</p>
+        ${confirmed.length ? `
+          <p style="margin:10px 0 4px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">Already established</p>
+          ${confirmed.map((c) => `<div style="font-size:12.5px">✓ ${h(c.label)}
+            <span class="evidence-source" style="display:inline;margin-left:6px">${h(c.from)}</span></div>`).join('')}` : ''}
+        ${stillMissing.length ? `
+          <p style="margin:10px 0 4px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">Still missing — what this run is for</p>
+          ${stillMissing.map((l) => `<div style="font-size:12.5px;color:var(--muted)">✗ ${h(l)}</div>`).join('')}` : ''}
+        ${validationHtml(mem.validation || [])}
+      </div>
+    </div>`;
+}
+
+/* Prior knowledge re-tested against the graph as it is now.
+ *
+ * The reason this is rendered at all: a stored card is a true record of when it
+ * was written, not a standing fact. If DataHub has moved on, inheriting it would
+ * let a stale finding buy confidence in the present — the specific way memory
+ * makes an agent worse instead of better. A CONFLICT withdraws the card as
+ * evidence in code, which can drop confidence far enough to block write-back. */
+function validationHtml(rows) {
+  if (!rows.length) return '';
+  const icon = { confirmed: '✓', conflict: '⚠', unverifiable: '?' };
+  const cls = { confirmed: 'chip-ok', conflict: 'chip-danger', unverifiable: '' };
+  const conflicts = rows.filter((r) => r.verdict === 'conflict').length;
+
+  return `
+    <p style="margin:14px 0 4px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">
+      Re-tested against live DataHub — prior knowledge is a hypothesis, not truth</p>
+    ${rows.map((r) => `
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0;font-size:12.5px">
+        <span class="chip ${cls[r.verdict] || ''}" style="flex:none">${icon[r.verdict] || '?'} ${h(r.verdict)}</span>
+        <span style="flex:1;min-width:0">
+          <span class="mono" style="font-size:11px">${h(r.incident_id)}</span>
+          <span style="color:var(--muted)"> — ${h(r.detail)}</span>
+        </span>
+      </div>`).join('')}
+    ${conflicts ? `
+      <div class="error-box" style="margin-top:10px">
+        <b>${conflicts} stored finding${conflicts === 1 ? '' : 's'} withdrawn.</b>
+        The graph no longer matches what ${conflicts === 1 ? 'it' : 'they'} recorded, so
+        ${conflicts === 1 ? 'it is' : 'they are'} no longer allowed to back any evidence check
+        this run. Confidence falls back to what this investigation proves for itself.
+      </div>` : ''}`;
+}
+
 /* The live decision panel. Reads only from the snapshot the server sends. */
 function panelHtml(s) {
   if (!s) {
@@ -376,7 +484,9 @@ function panelHtml(s) {
     <div class="check ${c.confirmed ? 'yes' : 'no'}">
       <span class="check-box">✓</span>
       <span class="check-label">${h(c.label)}
-        ${c.inherited ? '<span class="chip chip-purple" style="margin-left:6px">inherited</span>' : ''}
+        ${c.inherited
+          ? `<span class="evidence-source">↩ not re-run — proven by ${h(c.source || 'a prior investigation')}</span>`
+          : ''}
       </span>
     </div>`).join('');
 
@@ -478,6 +588,7 @@ function renderPostRun(s) {
   const rc = s.root_cause;
   const wb = s.write_back;
   const drift = s.schema_drift;
+  const k = s.knowledge || { stored: false };
   const refused = wb.locked;
 
   const banner = refused ? `
@@ -554,14 +665,40 @@ function renderPostRun(s) {
         </div>
       </div>` : ''}
 
-    ${s.card_urn ? `
-      <div style="height:14px"></div>
-      <div class="card">
-        <h3>Investigation Card</h3>
-        <p class="sub" style="font-size:13px">Written back into DataHub as a document entity, linked to
-        the assets it concerned. The next investigation of this incident reads it and continues.</p>
-        <p class="urn" style="margin-top:8px">${h(s.card_urn)}</p>
-        <div style="margin-top:10px"><a class="btn btn-sm" href="#/investigations">All investigations →</a></div>
+    ${k.stored ? `
+      <div style="height:16px"></div>
+      <div class="knowledge fade-in">
+        <p class="knowledge-head">Every incident makes DataHub smarter.</p>
+        <p class="sub" style="font-size:13px;max-width:74ch">This investigation was written back
+        into the catalog as a <code>document</code> entity, linked to the assets it concerned.
+        ${k.continues ? `It continues <b class="mono">${h(k.continues)}</b>, so the chain of
+        reasoning is now traceable across runs.` : 'The next investigation of this incident will
+        find it and continue instead of starting over.'}</p>
+
+        <div class="knowledge-nums">
+          <div>
+            <div class="knowledge-num">${k.proved_here}</div>
+            <div class="knowledge-cap">check(s) proved by this run</div>
+          </div>
+          <div>
+            <div class="knowledge-num">${k.reused}</div>
+            <div class="knowledge-cap">not re-run — inherited and verified</div>
+          </div>
+          <div>
+            <div class="knowledge-num">${k.available_next_run}</div>
+            <div class="knowledge-cap">now established for the next run</div>
+          </div>
+          <div>
+            <div class="knowledge-num">${(s.datahub_calls || {}).total || 0}</div>
+            <div class="knowledge-cap">DataHub calls this investigation</div>
+          </div>
+        </div>
+
+        <p class="urn" style="margin-top:14px">${h(s.card_urn)}</p>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <a class="btn btn-sm" href="#/investigation/${h(k.incident_id || '')}">Open this card</a>
+          <a class="btn btn-sm" href="#/investigations">All investigations →</a>
+        </div>
       </div>` : ''}
   `;
 }
@@ -581,6 +718,11 @@ async function viewInvestigations() {
       <p class="sub">Every run this agent has ever completed, read back out of DataHub itself. These are
       real <code>document</code> entities in the catalog — a human opening the dataset page sees the same
       record the next agent run will inherit.</p>
+      <div class="incident-meta" style="margin-top:12px">
+        <span class="chip chip-purple">${cards.filter((c) => c.continues_incident_id).length} continued a prior investigation</span>
+        <span class="chip chip-warn">${cards.filter((c) => c.decision === 'REFUSAL').length} refused to act</span>
+        <span class="chip chip-ok">${cards.filter((c) => c.decision === 'ACTION').length} wrote back</span>
+      </div>
     </div>
     ${data.error ? errorBox(data.error) : ''}
     ${cards.length === 0
@@ -590,6 +732,10 @@ async function viewInvestigations() {
             <div class="row-main">
               <div class="row-title">${h(c.incident_id)} · ${h(urnTail(c.root_cause_urn) || 'no root cause')}</div>
               <div class="row-sub">${h(c.trigger)}</div>
+              ${c.continues_incident_id
+                ? `<div class="chain" style="margin-top:4px">↩ continues ${h(c.continues_incident_id)}
+                     · ${c.reused_checks} check(s) not re-run</div>`
+                : ''}
             </div>
             <div class="row-side">
               ${decisionChip(c.decision)}
@@ -1124,6 +1270,29 @@ async function viewSettings() {
         <dt>LLM endpoint</dt><dd class="mono">${h(s.llm.endpoint || '—')}</dd>
         <dt>Deployment</dt><dd class="mono">${h(s.llm.deployment)}</dd>
       </dl>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="card">
+      <h3>Open-source contributions</h3>
+      <p class="sub" style="font-size:12.5px">Both came out of bugs this project hit while
+      building against the real MCP server. Submitted upstream — neither is merged.</p>
+      <div style="margin-top:12px">
+        <div class="gate-row" style="font-family:var(--sans);font-size:12.5px">
+          <span><a href="https://github.com/acryldata/mcp-server-datahub/pull/155" target="_blank"
+            rel="noopener" style="color:var(--accent)">mcp-server-datahub#155</a>
+            — filter docs: <code>report</code> is not a valid entity_type; BI artifacts index as
+            <code>dataset</code></span>
+          <span class="chip">submitted</span>
+        </div>
+        <div class="gate-row" style="font-family:var(--sans);font-size:12.5px">
+          <span><a href="https://github.com/acryldata/mcp-server-datahub/pull/198" target="_blank"
+            rel="noopener" style="color:var(--accent)">mcp-server-datahub#198</a>
+            — <code>sort_by="relevance"</code> makes every search fail with
+            <code>all shards failed</code></span>
+          <span class="chip">submitted</span>
+        </div>
+      </div>
     </div>
 
     <div style="height:14px"></div>

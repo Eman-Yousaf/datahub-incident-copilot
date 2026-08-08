@@ -37,9 +37,11 @@ from .memory import (
     EvidenceItem,
     InvestigationCard,
     confirmed_evidence_keys,
+    confirmed_evidence_sources,
     new_incident_id,
 )
 from .mirror_audit import audit_schema_drift
+from .revalidate import conflicted_ids, revalidate_prior_knowledge
 
 SeverityTier = Literal["no_action", "tag_only", "tag_and_note", "tag_note_escalated"]
 
@@ -199,26 +201,51 @@ def validate_inheritance(findings: Findings, state: dict) -> list[str]:
     rather than in the prompt -- an honesty instruction the model usually follows is
     not a control.
     """
-    prior: list[InvestigationCard] = state.get("prior_cards") or []
+    all_prior: list[InvestigationCard] = state.get("prior_cards") or []
+    # A card whose claim live DataHub contradicts is withdrawn as evidence before
+    # any of this runs (see revalidate.py). It stays visible on the new card and in
+    # the UI -- the withdrawal is a finding, not a silent filter -- but it can no
+    # longer back an inheritance claim, so a run leaning on stale memory falls back
+    # to what it proved itself.
+    conflicted = set(state.get("conflicted_incident_ids") or ())
+    prior = [card for card in all_prior if card.incident_id not in conflicted]
+
     backed = confirmed_evidence_keys(prior)
+    stale_backed = confirmed_evidence_keys(
+        [card for card in all_prior if card.incident_id in conflicted]
+    )
+    sources = confirmed_evidence_sources(prior)
     recalled_ids = {card.incident_id for card in prior}
 
     dropped: list[str] = []
     kept: list[str] = []
+    # Which prior card each accepted claim rests on. Recorded for display only --
+    # the accept/reject decision above is unchanged -- so the UI can attribute a
+    # skipped check to a specific stored investigation instead of asserting a
+    # vague "inherited".
+    attribution: dict[str, str] = {}
     for key in dict.fromkeys(findings.inherited_evidence or []):
         if key not in _EVIDENCE_KEYS:
             dropped.append(f"`{key}` — not one of the four evidence checks")
             continue
         if key in backed:
             kept.append(key)
+            attribution[key] = sources.get(key, "")
             continue
-        dropped.append(
-            f"`{key}` — no recalled Investigation Card confirms this check, so it was "
-            "reset to unconfirmed"
-        )
+        if key in stale_backed:
+            dropped.append(
+                f"`{key}` — the only card confirming this check no longer matches live "
+                "DataHub, so it was withdrawn and the check reset to unconfirmed"
+            )
+        else:
+            dropped.append(
+                f"`{key}` — no recalled Investigation Card confirms this check, so it was "
+                "reset to unconfirmed"
+            )
         setattr(findings, key, False)
 
     findings.inherited_evidence = kept
+    state["inheritance_sources"] = attribution
 
     if findings.continues_incident_id and findings.continues_incident_id not in recalled_ids:
         dropped.append(
@@ -342,6 +369,7 @@ def build_card(state: dict) -> InvestigationCard:
         subject_urn=state.get("subject_urn"),
         root_cause_urn=findings.root_cause_urn,
         root_cause_summary=findings.root_cause_summary,
+        root_cause_field=findings.changed_field_path,
         outcome=findings.outcome,
         evidence=evidence,
         hypotheses_tested=findings.hypotheses_tested,
@@ -399,6 +427,18 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
         case), report it in changed_field_path -- this automatically checks whether
         same-entity mirrors on other platforms are running stale schema."""
         findings = Findings(**kwargs)
+
+        # Re-test stored knowledge against the graph as it is now, BEFORE anything
+        # is allowed to inherit from it. A card can be entirely genuine and still
+        # describe a state DataHub has since moved on from, and a stale finding
+        # buying confidence in the present is the specific way memory makes an
+        # agent worse rather than better.
+        prior_cards = state.get("prior_cards") or []
+        if prior_cards:
+            validation = await revalidate_prior_knowledge(list_schema_fields_tool, prior_cards)
+            state["prior_validation"] = validation
+            state["conflicted_incident_ids"] = conflicted_ids(validation)
+
         # Verify inheritance claims BEFORE the arithmetic runs, so an unbacked claim
         # can't buy confidence it didn't earn.
         dropped = validate_inheritance(findings, state)
@@ -445,6 +485,18 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
             if dropped
             else ""
         )
+        validation_rows = state.get("prior_validation") or []
+        revalidation = (
+            "Prior knowledge re-tested against live DataHub:\n"
+            + "\n".join(
+                f"  - {row['incident_id']}: {row['verdict'].upper()} -- {row['detail']}"
+                for row in validation_rows
+            )
+            + "\n"
+            if validation_rows
+            else ""
+        )
+
         mirrors_checked = (schema_drift or {}).get("mirrors_checked", [])
         mirrors_stale = (schema_drift or {}).get("mirrors_stale", [])
         if schema_drift is None:
@@ -474,6 +526,7 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
             )
 
         return (
+            f"{revalidation}"
             f"{rejected}"
             f"Root-cause confidence: {confidence_level.upper()} "
             f"({checked}/{total} evidence checks confirmed)\n"
