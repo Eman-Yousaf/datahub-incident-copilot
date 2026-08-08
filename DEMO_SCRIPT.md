@@ -3,100 +3,145 @@
 Working notes for recording the required demo video -- a shot list so recording is a
 planned take rather than improvised.
 
+**Record the web app, not the CLI.** Everything below happens at
+`incident-copilot-demo.centralindia.cloudapp.azure.com`. A judge watching a terminal has
+to take your word for what the code did; a judge watching the decision panel can see the
+policy resolve. The CLI still works and is the same code path -- it's just the worse shot.
+
 **The story is not "watch an agent walk a lineage graph."** Plenty of agents do that. The
-story is: *this one knows when not to act, explains why, learns from every investigation,
-and never starts from scratch.* Everything below is ordered to land that, and to land it
-before a judge stops watching.
+story is: *it proves the cause against DataHub, refuses to act when the evidence is thin,
+writes what it learned back into the catalog, and re-tests that memory before ever trusting
+it again.* Everything below is ordered to land that before a judge stops watching.
 
-**Before recording**: full clean baseline --
-`docker container prune -f && datahub docker nuke && datahub docker quickstart &&
-python seed_data.py`. Do not record against an instance that has had prior test
-write-backs applied: earlier runs' tags and appended notes show up as pre-existing
-catalog state and quietly destroy the "watch this happen live" framing. The reseed is
-also what makes run 1 genuinely start from an empty memory.
+## Before recording
 
-Recording two runs back to back is the whole point -- **do not skip run 1 to save time.**
-Run 1 is the one nobody else's demo has.
+Full clean baseline, on the VM:
+
+```
+docker container prune -f && datahub docker nuke && datahub docker quickstart
+cd ~/incident-copilot && .venv/bin/python seed_data.py
+sudo systemctl restart incident-copilot-web.service
+```
+
+Then wait ~3 minutes before testing anything -- DataHub's search index fills in slowly
+after a reseed, and an early check looks like a broken app.
+
+Why the reseed matters, beyond tidiness: earlier runs' tags and appended notes persist as
+catalog state and quietly destroy the "watch this happen live" framing. It also resets
+memory to exactly the two seeded prior investigations, which is what makes the beat in
+1:00-1:40 fire.
+
+**Check `docker ps` shows six containers** right before you record. OpenSearch on this VM
+dies roughly every 26 hours; the watchdog cron restarts it, but a run that starts mid-repair
+will look broken. `curl` returning 200 proves nothing -- the web server is fine either way.
+
+**Record the memory run first.** Every investigation you run stores a new card, and recall
+returns the two *most relevant* ones. After a couple of takes, your fresh cards outrank the
+seeded history and the CONFLICT beat stops appearing. If you need another take, re-run
+`seed_data.py` first.
 
 ## 0:00-0:20 -- Hook
 
-Lead with the refusal, not the capability:
+Open on the Command Center. Don't narrate the nav.
 
-> "Most incident agents give you an answer whether or not they have one. This one
-> refuses -- and then it writes down exactly what it would need to be sure, so the next
-> investigation doesn't start from zero."
+> "Most incident agents give you an answer whether or not they have one. This one proves
+> its answer against DataHub, refuses when it can't, and remembers what it learned --
+> then refuses to trust that memory until it re-checks it."
 
-## 0:20-1:10 -- Run 1: the refusal
+Point at one number: **actions / refusals**. A refusal is a recorded outcome, not a failure.
 
-Run the CLI against the incident report. Let it play close to real time; the narration is
-already good prose, so point at it rather than reading it aloud.
+## 0:20-1:00 -- Incident → investigation
 
-Beats to call out as they scroll past:
-- `recall_prior_investigations` fires **first**, and comes back empty -- this is a cold
-  start, and the agent says so.
-- It investigates for real, then hits the evidence checkpoint: **2 of 4 checks confirmed →
-  LOW → severity `no_action`.**
-- `add_tags` and `update_description` **do not run.** Say plainly: this is not the model
-  choosing to be cautious, it is a gate in Python the model cannot reach.
-- But the run is not empty -- an Investigation Card is written to DataHub naming the two
-  checks that were missing.
+Click **Order count discrepancy → Investigate**. Start the run.
 
-The line to land here: **a refusal that leaves a record is worth more than a guess.**
+Let the left pane scroll; don't read it aloud. Call out the right-hand panel instead, which
+is the part nobody else has:
 
-## 1:10-2:05 -- Run 2: it continues instead of restarting
+- the progress list ticking off real DataHub work
+- **◈ DataHub calls** climbing -- every one is a real MCP call to GMS
+- the four evidence checks filling in as they're confirmed
 
-Same command, same code, same prompt. Nothing changed except that memory now exists.
+Say plainly: *the model supplies evidence. It never scores itself.*
 
-- `recall_prior_investigations` returns run 1's card.
-- The agent **skips the two checks already confirmed** and spends its calls only on what
-  was missing. Call this out explicitly -- it is the "never starts from scratch" claim
-  made visible.
-- Watch for the schema-drift finding folded into `report_findings`' own output --
-  **all three cross-platform mirrors of the table -- snowflake, looker, powerbi -- are
-  running stale schema.** This is the beat worth slowing down for: DataHub's lineage
-  shows those as connected and has no way to tell you they disagree on shape. It's not
-  the agent's choice whether to check this -- `report_findings` runs the audit itself
-  the moment it has a confirmed root cause and field name, so this beat can't get
-  skipped on the take. Those mirrors keep producing the symptom even after the root
-  cause is fixed.
-- 4/4 → HIGH → `tag_note_escalated` → tags and an incident note are written, then
-  **re-read back out of DataHub** to prove they actually landed.
+## 1:00-1:40 -- The memory beat (the one to slow down for)
 
-If the run is long, speed up the middle and return to real time for the drift finding and
-the write-back. Those are the two moments that sell it.
+The purple banner appears before the agent touches anything: **prior verified knowledge
+found in DataHub** -- two stored investigations, what each already established, what's
+still missing.
 
-## 2:05-2:35 -- DataHub UI: proof it was real
+Then the part worth pausing on. Both cards are re-tested against the live graph:
 
-Browser to the `order_details` dataset page (http://localhost:9002):
-- the `incident-flagged` / `incident-severity-high` tags now on the entity
-- the appended note with the agent's actual finding
-- **the Investigation Cards themselves**, as `document` entities linked to the asset --
-  run 2's card citing run 1's
+```
+✓ confirmed   INC-20260806-091500   order_status_detail still present -- finding holds
+⚠ conflict    INC-20260807-143000   order_status_code_v1 is gone -- withdrawn as evidence
+```
 
-That last one is the shot that proves the memory is durable catalog metadata a human can
-read, not chat history that disappears when the process exits.
+The line to land:
 
-## 2:35-2:55 -- Close
+> "A stored finding is a true record of when it was written -- not a standing fact. This
+> one no longer matches the graph, so it's withdrawn. The agent doesn't get to trust its
+> own memory."
+
+Then show the consequence, which is the proof it isn't cosmetic: the withdrawn checks
+**reset to unconfirmed**, confidence drops, and severity falls a tier. Verified live:
+4/4 claimed → 2/4 allowed → HIGH → MEDIUM → `tag_note_escalated` → `tag_and_note`.
+
+## 1:40-2:15 -- Gate, drift, write-back
+
+- **Write-back gate**: `add_tags` / `update_description` shown permitted or refused, with
+  the authorized target URNs. Say it once: *this is Python, not a prompt the model usually
+  follows.*
+- **Cross-platform mirrors**: snowflake / looker / powerbi chips. DataHub's lineage shows
+  all three as connected and has no way to tell you they disagree on *shape*. Two of the
+  three are only reachable at 2 hops. They keep producing the symptom after the root cause
+  is fixed.
+- Write-back events: `PROPOSED → ALLOWED → APPLIED → VERIFIED`, the last being a re-read
+  out of DataHub rather than a bare `success: true`.
+
+If you'd rather show the refusal instead, run **Replica out of sync** -- it lands at
+1/4 LOW → `no_action` → gate `🔒 LOCKED`, both tools refused. Pick one; there isn't time
+for both.
+
+## 2:15-2:40 -- It compounds
+
+The closing panel: **Every incident makes DataHub smarter** -- checks proved by this run,
+checks not re-run, checks now established for the next one, DataHub calls made.
+
+Then **Investigations** in the nav: every run ever completed, read back out of DataHub as
+real `document` entities, refusals included, with `↩ continues INC-…` chains between them.
+
+> "This isn't chat history. It's catalog metadata a human opens on the dataset page, and
+> the next investigation reads it and continues."
+
+Optional, if there's room: **Lineage** -- the real graph, 38 nodes, every edge a
+relationship DataHub actually traversed.
+
+## 2:40-2:55 -- Close
 
 > "Four things the model is never allowed to decide: its own confidence, its own severity,
-> whether a write is permitted, and which entity that write may touch. All four are plain
-> Python. The agent investigates; the code decides what may be done about it."
+> whether a write is permitted, and which entity that write may touch. Plus one more --
+> whether its own memory still holds. All five are plain Python."
 
-Optionally, the honest one-liner -- it tends to land well with engineers:
+The honest one-liner, if it fits -- it tends to land with engineers:
 
 > "The gate caught a bug in itself: the first time the agent tried to tag something it
-> wasn't authorized to, the block crashed the run instead of blocking it. That's in the
+> wasn't authorized to, the block crashed the run instead of blocking it. It's in the
 > commit history."
 
 ## 2:55-3:00 -- End card
 
 Repo: github.com/Eman-Yousaf/datahub-incident-copilot
 Live: incident-copilot-demo.centralindia.cloudapp.azure.com
+Upstream PRs: acryldata/mcp-server-datahub #155, #198 (submitted, not merged)
 
 ## Recording notes
 
-- Terminal font large enough to read on a phone.
-- Do a silent dry run first so pacing lines up with what's on screen.
-- Redirect stdout and stderr **separately** if capturing (`> out.log 2> err.log`) -- the
-  MCP server's stderr logging is multi-KB of GraphQL and will bury the narration.
+- **Don't navigate away mid-run.** Leaving the page closes the stream and cancels the
+  investigation server-side.
+- A newly stored card takes a few seconds to appear under Investigations -- that view reads
+  the search index, which lags writes. Don't cut to it instantly.
+- Browser at a readable zoom; the decision panel is the thing that must be legible on a
+  phone, not the log.
+- Do a silent dry run first so pacing lines up with what's actually on screen. Run length
+  varies -- the agent genuinely decides its own path.
 - Keep it under 3:00. The brief requires it, and judges rarely watch past it.
