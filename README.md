@@ -30,6 +30,50 @@ agent recalls the cards stored for this incident, inherits the checks already co
 skips the hypotheses already ruled out, and spends its tool calls only on what's still
 missing or may have changed. Uncertainty from run 1 becomes the agenda for run 2.
 
+**And it doesn't trust that knowledge either.** A stored card is a true record of *when it
+was written*, not a standing fact about the graph. Before any of it counts, every recalled
+card naming a concrete claim — a field on a specific URN — has that claim **re-tested
+against live DataHub**: `confirmed`, `conflict`, or `unverifiable`. A contradicted card is
+withdrawn as evidence entirely, which lowers confidence and can pull severity down to
+`no_action`. Verified live: an agent claiming all four checks as inherited had two of them
+withdrawn by the graph, dropping it a full severity tier. Memory that can't be wrong is
+just a faster way to be confidently stale.
+
+## See it without cloning anything
+
+**Live: [incident-copilot-demo.centralindia.cloudapp.azure.com](https://incident-copilot-demo.centralindia.cloudapp.azure.com)** —
+running against a real DataHub instance with the showcase-ecommerce datapack loaded. Pick
+an incident and watch the policy layer resolve in real time.
+
+![Command center](docs/screenshots/command-center.jpg)
+
+Every investigation ever run, read back out of DataHub as `document` entities — refusals
+included, with `↩ continues` chains between them:
+
+![Investigations](docs/screenshots/investigations.jpg)
+
+A refusal, opened. The reason and the "required before action becomes safe" list are
+**derived from which checks failed**, not written by the model:
+
+![A refusal card](docs/screenshots/refusal-card.jpg)
+
+## It is not a script, and the catalog proves it
+
+Fixed scenario buttons are a fair thing to be suspicious of, so here is the receipt rather
+than a promise. The **same prompt, run seven times** against this instance produced **three
+different outcomes**, all still visible under Investigations:
+
+| Runs | Confidence | Decision | Root cause reached |
+|---|---|---|---|
+| × | 0/4 | REFUSAL `no_action` | none — search resolved a different, plausible table |
+| × | 3/4 | ACTION `tag_note_escalated` | `order_details` |
+| × | 4/4 | ACTION `tag_note_escalated` | `order_details` |
+
+The low-severity scenario likewise produced 1/4 and 2/4 on two runs, reaching a root cause
+once and not the other time. **A hardcoded path cannot fail**, and it cannot disagree with
+itself. The tool-call traces diverge too — one run skipped entity resolution entirely
+because recalled memory already supplied the URN.
+
 ## The demo, in two runs
 
 **Run 1 — the agent refuses.** Evidence comes back 2/4. Confidence LOW → severity
@@ -137,16 +181,27 @@ That Do Real Work").
   and reasoning as they happen
 - `seed_data.py` — loads DataHub's real showcase-ecommerce datapack and locks the incident
   trigger points used for the demo
+- `src/incident_copilot/revalidate.py` — re-tests each recalled card's claim against live
+  DataHub before it may count as evidence; only a contradiction withdraws a card, because
+  an absence you couldn't confirm is not evidence of absence
+- `src/incident_copilot/datahub_api.py` — read-only GraphQL used by the web UI's explorer
+  views, deliberately separate from the agent's MCP path so nothing there can write
+- `src/incident_copilot/panel.py` — snapshots the live policy state for the UI; computes
+  nothing, so the panel can't disagree with the gate
 - `cli.py` — entry point: `python cli.py "our revenue dashboard looks wrong"`
-- `webapp.py` — FastAPI wrapper streaming the same agent to a browser via SSE
-- `tests/test_write_back_gate.py` — regression tests for the gate itself: what it blocks,
-  what it permits, and that a refusal returns in the shape LangChain demands rather than
-  crashing the run
-- `tests/test_report_findings_drift.py` — regression tests for the automatic schema-drift
-  audit: when it runs, when it cleanly stays off, and that a malformed tool response can't
-  crash the mandatory `report_findings` checkpoint. Both test files run with
-  `python tests/test_*.py`, no live DataHub needed
+- `webapp.py` + `web/` — the application: command center, live investigation workspace,
+  investigation history, interactive lineage graph, entity explorer, status
 - `examples/` — unedited recorded investigation output
+
+**86 tests, no live DataHub needed** — `python tests/test_<name>.py`, each exits non-zero
+on failure:
+
+| Suite | Covers |
+|---|---|
+| `test_write_back_gate.py` (19) | what the gate blocks and permits, and that a refusal returns in the shape LangChain demands rather than crashing the run |
+| `test_report_findings_drift.py` (10) | when the schema-drift audit runs, when it cleanly stays off, and that a malformed tool response can't crash the mandatory checkpoint |
+| `test_panel_snapshot.py` (37) | that a blocked mutation reaches the UI, and that nothing is invented before the policy layer has run |
+| `test_prior_knowledge_revalidation.py` (20) | that stale memory is withdrawn, that unverifiable memory is *not*, and that a withdrawal really does block the write-back |
 
 Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those
 are implementation choices; the thing being built is the trust and memory layer around
