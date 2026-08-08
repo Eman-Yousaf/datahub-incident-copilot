@@ -57,6 +57,21 @@ A refusal, opened. The reason and the "required before action becomes safe" list
 
 ![A refusal card](docs/screenshots/refusal-card.jpg)
 
+## Don't take the safety claim on faith — attack it yourself
+
+In a healthy investigation the write-back gate never fires, which makes the most important
+behaviour in the project the one a live demo is least likely to show. "The model didn't
+misbehave while you watched" is not evidence.
+
+So **[Policy → Run the attacks](https://incident-copilot-demo.centralindia.cloudapp.azure.com/#/policy)**
+stages ten hostile write attempts against the real `_gate_mutation_tool` wrapper — imported,
+not reimplemented — including the two that actually happened during development: a run that
+tagged an entity it wasn't authorized to touch, and a URN smuggled past the check as a bare
+string. Two scenarios are legitimate and *should* succeed; a gate that blocks everything
+proves nothing. Nothing can reach DataHub either way — the tool beneath the gate is a stub.
+
+![Policy self-test](docs/screenshots/policy-selftest.jpg)
+
 ## It is not a script, and the catalog proves it
 
 Fixed scenario buttons are a fair thing to be suspicious of, so here is the receipt rather
@@ -202,6 +217,7 @@ on failure:
 | `test_report_findings_drift.py` (10) | when the schema-drift audit runs, when it cleanly stays off, and that a malformed tool response can't crash the mandatory checkpoint |
 | `test_panel_snapshot.py` (37) | that a blocked mutation reaches the UI, and that nothing is invented before the policy layer has run |
 | `test_prior_knowledge_revalidation.py` (20) | that stale memory is withdrawn, that unverifiable memory is *not*, and that a withdrawal really does block the write-back |
+| `test_web_bundle.py` (18) | that the shipped UI actually parses — a JS syntax error blanks every view at once while the server still answers 200 |
 
 Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those
 are implementation choices; the thing being built is the trust and memory layer around

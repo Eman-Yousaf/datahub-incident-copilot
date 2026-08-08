@@ -149,6 +149,12 @@ class InvestigationCard(BaseModel):
     continues_incident_id: str | None = None
     reused_checks: int = 0
 
+    # How many real DataHub calls this investigation cost. Recorded so the value of
+    # memory can be *measured* against the run it continued rather than asserted --
+    # "continues instead of restarting" is a claim about work avoided, and work
+    # avoided is a number.
+    datahub_calls: int = 0
+
     # Inheritance claims the code refused to honour because no recalled card actually
     # confirmed them. Recorded rather than silently discarded: a run that tried to
     # carry forward evidence it never had is exactly the thing a reader wants to see.

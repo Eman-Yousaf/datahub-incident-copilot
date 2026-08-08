@@ -393,6 +393,7 @@ def build_card(state: dict) -> InvestigationCard:
         actions_taken=list(state.get("actions_taken", [])),
         continues_incident_id=findings.continues_incident_id,
         reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
+        datahub_calls=len(state.get("datahub_calls") or []),
         dropped_inheritance=list(state.get("dropped_inheritance", [])),
         schema_drift_field=schema_drift.get("checked_field"),
         schema_drift_mirrors_checked=len(mirrors_checked),

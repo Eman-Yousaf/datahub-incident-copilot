@@ -393,6 +393,7 @@ def _card_row(card: InvestigationCard, document_urn: str) -> dict:
         "dropped_inheritance": card.dropped_inheritance,
         "continues_incident_id": card.continues_incident_id,
         "reused_checks": card.reused_checks,
+        "datahub_calls": card.datahub_calls,
         "actions_taken": card.actions_taken,
         "provenance": card.provenance,
         "schema_drift_field": card.schema_drift_field,

@@ -613,9 +613,37 @@ function renderPostRun(s) {
       </div>
     </div>`;
 
+  // The closing scoreboard. Every row is a value the policy layer already computed;
+  // nothing here is recalculated, so the report cannot disagree with the run it
+  // summarises.
+  const validation = (s.memory && s.memory.validation) || [];
+  const trustRows = [
+    ['Evidence confirmed', `${s.confidence.confirmed}/${s.confidence.total}`, s.confidence.confirmed === s.confidence.total],
+    ['Root cause', rc.urn ? 'CONFIRMED' : 'NOT ESTABLISHED', !!rc.urn],
+    ['Stale cross-platform mirrors', drift ? String(drift.stale.length) : '—', drift ? drift.stale.length === 0 : null],
+    ['Prior knowledge withdrawn', String(validation.filter((v) => v.verdict === 'conflict').length), null],
+    ['Write-back gate', refused ? 'LOCKED' : 'OPEN', !refused],
+    ['Actions authorized', String(wb.actions_taken.length), null],
+    ['Verification', (wb.events || []).some((e) => e.stage === 'verified') ? 'PASSED'
+      : wb.actions_taken.length ? 'NOT CONFIRMED' : 'N/A — nothing was written', null],
+    ['DataHub calls', String((s.datahub_calls || {}).total || 0), null],
+  ];
+
   $('#post-run').innerHTML = `
     <div style="height:24px"></div>
     ${banner}
+    <div style="height:16px"></div>
+
+    <div class="card">
+      <h3>Trust report</h3>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:0 24px">
+        ${trustRows.map(([label, value, good]) => `
+          <div class="gate-row" style="font-family:var(--sans);font-size:12.5px">
+            <span style="color:var(--muted)">${h(label)}</span>
+            <span class="mono" style="color:${good === null ? 'var(--text)' : good ? 'var(--ok)' : 'var(--warn)'}">${h(value)}</span>
+          </div>`).join('')}
+      </div>
+    </div>
     <div style="height:16px"></div>
 
     <div class="grid grid-2">
@@ -671,9 +699,9 @@ function renderPostRun(s) {
         <p class="knowledge-head">Every incident makes DataHub smarter.</p>
         <p class="sub" style="font-size:13px;max-width:74ch">This investigation was written back
         into the catalog as a <code>document</code> entity, linked to the assets it concerned.
-        ${k.continues ? `It continues <b class="mono">${h(k.continues)}</b>, so the chain of
-        reasoning is now traceable across runs.` : 'The next investigation of this incident will
-        find it and continue instead of starting over.'}</p>
+        ${k.continues
+          ? `It continues <b class="mono">${h(k.continues)}</b>, so the chain of reasoning is now traceable across runs.`
+          : 'The next investigation of this incident will find it and continue instead of starting over.'}</p>
 
         <div class="knowledge-nums">
           <div>
@@ -1203,6 +1231,75 @@ function drawGraph(container, data, opts = {}) {
   });
 }
 
+/* ---------------------------------------------------------------- policy -- */
+
+/* The gate, attacked on demand.
+ *
+ * In a healthy investigation the write-back gate never fires, which makes the most
+ * important behaviour in the project the one a live demo is least likely to show.
+ * "The model didn't misbehave while you watched" is not evidence. So the attempts
+ * are staged rather than waited for, against the real gate code — only the tool
+ * underneath is a stub, so nothing here can reach DataHub either way. */
+async function viewPolicy() {
+  setView(`
+    <div class="page-head fade-in">
+      <p class="eyebrow">System</p>
+      <h1>Policy self-test</h1>
+      <p class="sub">Ten deliberately hostile write attempts, put through the same
+      <code>_gate_mutation_tool</code> wrapper the agent's own tools go through. Two of them are
+      legitimate and should succeed — a gate that blocks everything proves nothing.
+      Nothing here can write to DataHub: the tool underneath the gate is a stub.</p>
+      <div style="margin-top:14px"><button class="btn btn-primary" id="run-selftest">▶ Run the attacks</button></div>
+    </div>
+    <div id="selftest-out"><div class="empty">Not run yet.</div></div>
+  `);
+
+  $('#run-selftest').addEventListener('click', async () => {
+    const btn = $('#run-selftest');
+    btn.disabled = true; btn.textContent = 'Running…';
+    $('#selftest-out').innerHTML = '<div class="loading-page"><span class="spinner"></span> Attacking the gate…</div>';
+    try {
+      const r = await api('/api/policy-selftest');
+      $('#selftest-out').innerHTML = selftestHtml(r);
+    } catch (e) {
+      $('#selftest-out').innerHTML = errorBox(e.message);
+    }
+    btn.disabled = false; btn.textContent = '▶ Run again';
+  });
+}
+
+function selftestHtml(r) {
+  const allPassed = r.passed === r.total;
+  return `
+    <div class="banner ${allPassed ? 'banner-action' : 'banner-refusal'} fade-in">
+      <span class="banner-icon">${allPassed ? '✓' : '⚠'}</span>
+      <div>
+        <b>${r.passed} of ${r.total} scenarios behaved exactly as specified.</b>
+        <p class="sub" style="font-size:12.5px;margin-top:4px">${r.blocked} write attempt(s)
+        refused by code; ${r.total - r.blocked} allowed through because they were earned.
+        Each row states what it expected before it ran, so a regression shows up red here
+        rather than being quietly rendered as success.</p>
+      </div>
+    </div>
+    <div style="height:16px"></div>
+    ${r.scenarios.map((s) => `
+      <div class="card" style="margin-bottom:10px;border-color:${s.passed ? 'var(--border)' : 'rgba(248,81,73,.5)'}">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <span class="chip ${s.blocked ? 'chip-danger' : 'chip-ok'}" style="flex:none">
+            ${s.blocked ? '✗ BLOCKED' : '✓ ALLOWED'}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:13.5px">${h(s.attack)}</div>
+            <div class="row-sub mono" style="font-size:11.5px;margin-top:2px">${h(s.detail)}</div>
+            <p class="sub" style="font-size:12.5px;margin-top:8px">${h(s.why)}</p>
+            <div class="formula" style="margin-top:8px">${h(s.message).slice(0, 400)}</div>
+          </div>
+          <span class="chip ${s.passed ? 'chip-ok' : 'chip-danger'}" style="flex:none">
+            ${s.passed ? 'as specified' : 'UNEXPECTED'}</span>
+        </div>
+      </div>`).join('')}
+  `;
+}
+
 /* -------------------------------------------------------------- activity -- */
 
 async function viewActivity() {
@@ -1332,6 +1429,7 @@ async function route() {
     if (segments[0] === 'entities') return await viewEntities(params.get('q'));
     if (segments[0] === 'entity') return await viewEntity(params.get('urn'));
     if (segments[0] === 'lineage') return await viewLineage(params.get('urn'));
+    if (segments[0] === 'policy') return await viewPolicy();
     if (segments[0] === 'activity') return await viewActivity();
     if (segments[0] === 'settings') return await viewSettings();
     setView('<div class="empty">Page not found.</div>');

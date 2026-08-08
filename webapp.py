@@ -36,6 +36,7 @@ from incident_copilot.mcp_client import datahub_tools
 from incident_copilot.memory import RELEVANCE_THRESHOLD, relevance
 from incident_copilot.narrate import format_new_messages
 from incident_copilot.panel import snapshot
+from incident_copilot.policy_selftest import run_selftest
 
 load_dotenv()
 
@@ -144,6 +145,19 @@ def _relevance_to(card_row: dict, prompt: str) -> float:
 @app.get("/api/investigations")
 async def investigations() -> dict:
     return await datahub_api.investigation_cards(limit=100)
+
+
+@app.get("/api/policy-selftest")
+async def policy_selftest() -> dict:
+    """Run the real write-back gate against deliberately hostile attempts.
+
+    Safe to expose publicly: the scenarios run against a stub tool rather than a
+    live MCP connection, so no path through this endpoint can reach DataHub. It
+    exists because in a healthy investigation the gate never fires, which makes
+    the single most important behaviour in the project the one a live demo is
+    least likely to show.
+    """
+    return await run_selftest()
 
 
 # Every field of every dataset is itself a searchable `schemaField` entity in
