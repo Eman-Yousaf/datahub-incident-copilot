@@ -91,6 +91,19 @@ inside DataHub that the next investigation reads and continues from.
   of the three are only reachable at 2 hops. They keep producing the same symptom after the
   root cause is fixed. The agent supplies only the field name; the verdict is established
   by real tool calls in code, never asserted.
+- **Prior knowledge is a hypothesis, not truth — and the graph gets a veto.** A stored
+  card can be entirely genuine and still be out of date. An investigation that correctly
+  proved `order_status_detail` was the cause last week is a true record *of last week*; if
+  that field has since been reverted or the table rebuilt, the card describes a world that
+  no longer exists. Inheriting it would let a stale finding buy confidence in the present —
+  the specific way an agent with memory becomes worse than one without. So every recalled
+  card naming a concrete claim (a field on a specific URN) has that claim **re-tested
+  against live DataHub** before the confidence arithmetic runs: `confirmed`, `conflict`, or
+  `unverifiable`. Only a conflict withdraws the card — an absence you couldn't confirm is
+  not evidence of absence. And a withdrawn card doesn't just lose a badge: its checks stop
+  backing inheritance entirely, so the run falls back to what it proved itself. Verified end
+  to end: a run inheriting two checks from a contradicted card drops to 0/4 LOW and refuses
+  to act **despite a 25-entity blast radius across two platforms**.
 - **Inherited evidence is verified, not taken on faith.** A run that claims it carried a
   check forward from a prior card has that claim checked against the cards recall actually
   returned. An unbacked claim resets the check to unconfirmed — lowering confidence, and
