@@ -1,17 +1,21 @@
-# Demo video script (target: under 3:00)
+# Demo video script (hard limit: 3:00)
 
-Working notes for recording the required demo video -- a shot list so recording is a
-planned take rather than improvised.
+Working notes for the required demo video — a shot list, so recording is a planned take
+rather than an improvisation.
 
-**Record the web app, not the CLI.** Everything below happens at
-`incident-copilot-demo.centralindia.cloudapp.azure.com`. A judge watching a terminal has
-to take your word for what the code did; a judge watching the decision panel can see the
-policy resolve. The CLI still works and is the same code path -- it's just the worse shot.
+**The structural decision: lead with the revocation, don't build to it.**
 
-**The story is not "watch an agent walk a lineage graph."** Plenty of agents do that. The
-story is: *it proves the cause against DataHub, refuses to act when the evidence is thin,
-writes what it learned back into the catalog, and re-tests that memory before ever trusting
-it again.* Everything below is ordered to land that before a judge stops watching.
+Every submission in this hackathon climaxes at 2:30. Judges stop watching well before
+that. So the first twenty seconds are the thing nothing else in the field can show —
+a write that succeeds, then the identical write refused because DataHub moved underneath
+the permission — and everything after it explains how that was possible.
+
+Do not open with an architecture diagram. Do not open with a nav tour.
+
+**Record the web app**, except for the cold-open, which is the terminal. A judge watching
+a terminal has to take your word for what happened; a judge watching the decision panel
+can see the policy resolve. The one exception is the counterfactual, where the terminal is
+*better* — it makes clear no browser state is involved.
 
 ## Before recording
 
@@ -23,125 +27,160 @@ cd ~/incident-copilot && .venv/bin/python seed_data.py
 sudo systemctl restart incident-copilot-web.service
 ```
 
-Then wait ~3 minutes before testing anything -- DataHub's search index fills in slowly
-after a reseed, and an early check looks like a broken app.
-
-Why the reseed matters, beyond tidiness: earlier runs' tags and appended notes persist as
-catalog state and quietly destroy the "watch this happen live" framing. It also resets
-memory to exactly the two seeded prior investigations, which is what makes the beat in
-1:00-1:40 fire.
+Wait ~3 minutes before testing anything — DataHub's search index fills in slowly after a
+reseed, and an early check looks like a broken app.
 
 **Check `docker ps` shows six containers** right before you record. OpenSearch on this VM
 dies roughly every 26 hours; the watchdog cron restarts it, but a run that starts mid-repair
-will look broken. `curl` returning 200 proves nothing -- the web server is fine either way.
+looks broken. `curl` returning 200 proves nothing — the web server answers either way.
 
-**Record the memory run first.** Every investigation you run stores a new card, and recall
-returns the two *most relevant* ones. After a couple of takes, your fresh cards outrank the
-seeded history and the CONFLICT beat stops appearing. If you need another take, re-run
+**Record the memory run before any other take.** Every investigation stores a new card, and
+recall returns the two *most relevant*. After a couple of takes your fresh cards outrank the
+seeded history and the CONFLICT beat stops firing. If you need another take, re-run
 `seed_data.py` first.
 
-## 0:00-0:20 -- Hook
+**Dry-run `python counterfactual.py` once** before recording it. It takes ~40s including the
+settle waits, and you want to know its real pacing rather than discovering it on camera.
 
-Open on the Command Center. Don't narrate the nav.
+---
 
-> "Most incident agents give you an answer whether or not they have one. This one proves
-> its answer against DataHub, refuses when it can't, and remembers what it learned --
-> then refuses to trust that memory until it re-checks it."
+## 0:00–0:22 — Cold open: the authority disappears
+
+Terminal, already scrolled to the STEP 4/5 output of `python counterfactual.py`. No preamble,
+no logo.
+
+> "This agent just wrote to a data catalog. It was allowed to, and here's the proof it was
+> allowed to — the exact field, on the exact table, that justified it."
+
+Point at `AUTH-…` and predicate `P3`.
+
+> "Then that field was removed from DataHub. Nobody told the agent. It wasn't asked again,
+> and no model was involved in what happens next."
+
+Scroll to the refusal.
+
+> "Same authorization. Same write. Refused — because the thing it rested on stopped being
+> true. The agent didn't change its mind. The evidence changed, so the authority changed."
+
+**This is the whole submission.** Everything after this is showing that it's real.
+
+## 0:22–0:40 — What the problem actually is
+
+Cut to the Command Center.
+
+> "Most agents that touch a catalog get permission once and keep it. But catalogs move —
+> a field gets reverted, a mirror gets repaired — and the justification quietly stops being
+> true while the agent is still working. So here, permission is an artifact with grounds,
+> and the grounds are re-read at the moment of the write."
 
 Point at one number: **actions / refusals**. A refusal is a recorded outcome, not a failure.
 
-## 0:20-1:00 -- Incident → investigation
+## 0:40–1:15 — A real investigation, live
 
-Click **Order count discrepancy → Investigate**. Start the run.
+Click **Order count discrepancy → Investigate**.
 
-Let the left pane scroll; don't read it aloud. Call out the right-hand panel instead, which
-is the part nobody else has:
+Let the left pane scroll; don't read it aloud. Narrate the right panel:
 
 - the progress list ticking off real DataHub work
-- **◈ DataHub calls** climbing -- every one is a real MCP call to GMS
+- **◈ DataHub calls** climbing — every one a real MCP call to GMS
 - the four evidence checks filling in as they're confirmed
 
 Say plainly: *the model supplies evidence. It never scores itself.*
 
-## 1:00-1:40 -- The memory beat (the one to slow down for)
+## 1:15–1:45 — The memory beat
 
-The purple banner appears before the agent touches anything: **prior verified knowledge
-found in DataHub** -- two stored investigations, what each already established, what's
-still missing.
+The purple banner appears before the agent touches anything: prior investigations found in
+DataHub, what each established, what's still missing.
 
-Then the part worth pausing on. Both cards are re-tested against the live graph:
+Then both cards are re-tested against the live graph:
 
 ```
 ✓ confirmed   INC-20260806-091500   order_status_detail still present -- finding holds
 ⚠ conflict    INC-20260807-143000   order_status_code_v1 is gone -- withdrawn as evidence
 ```
 
-The line to land:
+> "A stored finding is a true record of when it was written, not a standing fact. This one
+> no longer matches the graph, so it's withdrawn — and the agent falls back to what it can
+> prove itself."
 
-> "A stored finding is a true record of when it was written -- not a standing fact. This
-> one no longer matches the graph, so it's withdrawn. The agent doesn't get to trust its
-> own memory."
+Show the consequence, which is what proves it isn't cosmetic: withdrawn checks reset to
+unconfirmed, confidence drops, severity falls a tier. Verified live: 4/4 claimed → 2/4
+allowed → HIGH → MEDIUM.
 
-Then show the consequence, which is the proof it isn't cosmetic: the withdrawn checks
-**reset to unconfirmed**, confidence drops, and severity falls a tier. Verified live:
-4/4 claimed → 2/4 allowed → HIGH → MEDIUM → `tag_note_escalated` → `tag_and_note`.
+## 1:45–2:15 — The authorization panel
 
-## 1:40-2:15 -- Gate, drift, write-back
+This is the beat the cold open promised to explain.
 
-- **Write-back gate**: `add_tags` / `update_description` shown permitted or refused, with
-  the authorized target URNs. Say it once: *this is Python, not a prompt the model usually
-  follows.*
-- **Cross-platform mirrors**: snowflake / looker / powerbi chips. DataHub's lineage shows
-  all three as connected and has no way to tell you they disagree on *shape*. Two of the
-  three are only reachable at 2 hops. They keep producing the symptom after the root cause
-  is fixed.
-- Write-back events: `PROPOSED → ALLOWED → APPLIED → VERIFIED`, the last being a re-read
-  out of DataHub rather than a bare `success: true`.
+- **Authorization**: `AUTH-…`, decision, and the predicates — each showing the aspect
+  (`schemaMetadata`), the tool that read it, the URN, and the observed value.
+- Say it once: *the id is a hash of those grounds. Same evidence, same id, every run.*
+- **Write-back gate**: authorized targets listed explicitly. Severity says how much;
+  the target list says to what.
+- Write-back events: `PROPOSED → ALLOWED → APPLIED → VERIFIED` — the last a re-read out of
+  DataHub, not a bare `success: true`.
 
-If you'd rather show the refusal instead, run **Replica out of sync** -- it lands at
-1/4 LOW → `no_action` → gate `🔒 LOCKED`, both tools refused. Pick one; there isn't time
-for both.
+If there's room: **Cross-platform mirrors** — snowflake / looker / powerbi chips. Lineage
+shows all three connected and cannot tell you they disagree on *shape*. Two of the three
+are only reachable at 2 hops.
 
-## 2:15-2:40 -- It compounds
+## 2:15–2:35 — Don't trust it, check it
 
-The closing panel: **Every incident makes DataHub smarter** -- checks proved by this run,
-checks not re-run, checks now established for the next one, DataHub calls made.
+Two commands, on screen, fast.
 
-Then **Investigations** in the nav: every run ever completed, read back out of DataHub as
-real `document` entities, refusals included, with `↩ continues INC-…` chains between them.
+```
+python verify_authorization.py      # recompute every stored authorization
+```
 
-> "This isn't chat history. It's catalog metadata a human opens on the dataset page, and
-> the next investigation reads it and continues."
+> "Every card stores the grounds its id was computed from. This recomputes all of them
+> straight out of the catalog. Edit one and it fails."
 
-Optional, if there's room: **Lineage** -- the real graph, 38 nodes, every edge a
-relationship DataHub actually traversed.
+Then **Policy → Run the attacks**.
 
-## 2:40-2:55 -- Close
+> "Thirteen hostile writes against the real gate — including two that move DataHub
+> underneath a live authorization. Three are legitimate and must succeed: a gate that
+> blocks everything proves nothing."
 
-> "Four things the model is never allowed to decide: its own confidence, its own severity,
-> whether a write is permitted, and which entity that write may touch. Plus one more --
-> whether its own memory still holds. All five are plain Python."
+## 2:35–2:52 — It compounds
 
-The honest one-liner, if it fits -- it tends to land with engineers:
+**Investigations** in the nav: every run ever completed, read back out of DataHub as real
+`document` entities, refusals included, `↩ continues` chains between them, each carrying the
+authorization it acted under.
 
-> "The gate caught a bug in itself: the first time the agent tried to tag something it
-> wasn't authorized to, the block crashed the run instead of blocking it. It's in the
-> commit history."
+> "Not chat history. Catalog metadata a human opens on the dataset page — and the next
+> investigation reads it and continues."
 
-## 2:55-3:00 -- End card
+## 2:52–3:00 — End card
 
-Repo: github.com/Eman-Yousaf/datahub-incident-copilot
-Live: incident-copilot-demo.centralindia.cloudapp.azure.com
-Upstream PRs: acryldata/mcp-server-datahub #155, #198 (submitted, not merged)
+> "Most agents tell you what happened. This one can prove why it was allowed to act —
+> and notices when it isn't anymore."
+
+```
+github.com/Eman-Yousaf/datahub-incident-copilot
+incident-copilot-demo.centralindia.cloudapp.azure.com
+Upstream: acryldata/mcp-server-datahub #155, #198 (submitted, not merged)
+```
+
+---
+
+## Backup plans
+
+Assume something breaks; decide now rather than on camera.
+
+| If this fails | Do this |
+|---|---|
+| VM down / OpenSearch dead | Cut to the pre-recorded fallback capture (record one *today*, before you need it) |
+| Live investigation stalls mid-run | Cut to Investigations and narrate a stored card — same policy layer, already resolved |
+| `counterfactual.py` races the settle window | It aborts rather than showing a race. Re-run; it's idempotent and restores the field in `finally` |
+| Agent reaches a different conclusion than the take you planned | Say so out loud. It's a feature — the run table in the README shows three different outcomes from one prompt |
 
 ## Recording notes
 
 - **Don't navigate away mid-run.** Leaving the page closes the stream and cancels the
   investigation server-side.
-- A newly stored card takes a few seconds to appear under Investigations -- that view reads
+- A newly stored card takes a few seconds to appear under Investigations — that view reads
   the search index, which lags writes. Don't cut to it instantly.
-- Browser at a readable zoom; the decision panel is the thing that must be legible on a
-  phone, not the log.
-- Do a silent dry run first so pacing lines up with what's actually on screen. Run length
-  varies -- the agent genuinely decides its own path.
-- Keep it under 3:00. The brief requires it, and judges rarely watch past it.
+- Browser at a readable zoom. The decision panel must be legible on a phone; the log doesn't
+  have to be.
+- Do one silent dry run so pacing matches what's actually on screen. Run length varies —
+  the agent genuinely decides its own path.
+- Keep it under 3:00. The rules require it and judges rarely watch past it.

@@ -1,22 +1,59 @@
 # Incident Copilot
 
-**Incident Copilot is a trust-aware incident investigation agent that gathers evidence,
-refuses unsafe actions through deterministic policy, writes structured operational
-knowledge back into DataHub, and enables future investigations to continue instead of
-starting from scratch.**
+**An LLM agent that investigates data incidents and writes its conclusions back into
+DataHub — where the permission to write is a deterministic artifact that expires when
+the evidence does.**
 
-Most data-incident agents answer a question once and forget it. The next time the same
-dashboard looks wrong, the next run starts cold: same searches, same lineage walks, same
-dead ends, same uncertainty. And when an agent isn't sure, it usually either guesses
-anyway or produces nothing at all.
+The interesting question about an autonomous agent is not whether it can find the root
+cause. It's what happens in the gap between deciding to act and acting. Catalogs move.
+A field gets reverted, a mirror gets repaired, an upstream is rebuilt — and the
+justification the agent was operating on quietly stops being true while it is still
+mid-run.
 
-Incident Copilot treats both of those as design problems.
+So every mutation here carries an **authorization proof**: the predicates it rests on,
+where in DataHub each one was observed, the exact URNs it covers, and a hash over all of
+it. The id is a function of the grounds, so the same evidence about the same entities
+always produces the same `AUTH-…`.
+
+**And the proof is re-read at the instant of the write, not trusted from when it was
+issued.** A predicate that stopped holding revokes exactly the targets it was grounding:
+
+```
+AUTH-4c5f655da127  ALLOW      →  add_tags on order_details          ✓ written, read back
+   P3 [✓] Field `order_status_detail` is present on the root-cause entity
+          schemaMetadata · list_schema_fields · …order_details → observed 'current'
+
+   ── the field is removed from DataHub. nobody tells the agent. ──
+
+AUTH-4c5f655da127  REVOKED    →  add_tags on order_details          ✗ refused
+   P3 [✗] observed 'current' → now 'stale'
+```
+
+The agent didn't change its mind. It was never asked. The evidence changed, so the
+authority changed — in Python, with no model in the process.
+
+Run it yourself: **`python counterfactual.py`** does exactly the above against a live
+instance, then puts the field back.
+
+**Don't trust the hash — recompute it.** Every stored card carries the grounds its id was
+computed from, so `python verify_authorization.py` rebuilds every authorization this agent
+ever issued straight out of the catalog and tells you whether the numbers were derived or
+decorative. Editing a stored proof makes it fail.
+
+---
+
+The rest of the design follows from the same rule: the model supplies evidence, and
+nothing else.
 
 **Whether the agent is allowed to write is decided in Python, never by the LLM.** The
 model supplies evidence — which of four checks a tool call actually confirmed. Confidence
 is `confirmed / total`. Severity is a fixed function of confidence and blast radius. Below
 a threshold, the write-back tools refuse to run at all: not discouraged in a prompt,
 blocked in `decision.py`. The model can't argue its way past arithmetic.
+
+Most data-incident agents also answer a question once and forget it. The next time the
+same dashboard looks wrong, the next run starts cold: same searches, same lineage walks,
+same dead ends. Incident Copilot treats that as a design problem too.
 
 **A refusal is not a failed run — it's the output.** Every investigation, including one
 that refuses to act, ends by writing an **Investigation Card** into DataHub as a
@@ -64,11 +101,13 @@ behaviour in the project the one a live demo is least likely to show. "The model
 misbehave while you watched" is not evidence.
 
 So **[Policy → Run the attacks](https://incident-copilot-demo.centralindia.cloudapp.azure.com/#/policy)**
-stages ten hostile write attempts against the real `_gate_mutation_tool` wrapper — imported,
-not reimplemented — including the two that actually happened during development: a run that
-tagged an entity it wasn't authorized to touch, and a URN smuggled past the check as a bare
-string. Two scenarios are legitimate and *should* succeed; a gate that blocks everything
-proves nothing. Nothing can reach DataHub either way — the tool beneath the gate is a stub.
+stages thirteen hostile write attempts against the real `_gate_mutation_tool` wrapper —
+imported, not reimplemented — including the two that actually happened during development:
+a run that tagged an entity it wasn't authorized to touch, and a URN smuggled past the
+check as a bare string. Two of them move DataHub *underneath* a live authorization and
+confirm it is revoked. Three scenarios are legitimate and *should* succeed — including one
+where the grounds still hold at write time, because a re-check that only ever revokes
+proves nothing. Nothing can reach DataHub either way: the tool beneath the gate is a stub.
 
 ![Policy self-test](docs/screenshots/policy-selftest.jpg)
 
@@ -116,6 +155,7 @@ Four things the model is never allowed to decide for itself:
 | Severity tier | `f(confidence, datasets, dashboards, criticality, stale mirrors)` | `decision.py` |
 | Whether a write may happen | severity gate wrapping the mutation tools | `mcp_client.py` |
 | *Which entity* a write may touch | `_authorized_targets`: the confirmed root cause, plus mirrors code proved stale | `mcp_client.py` |
+| Whether the permission **still holds at write time** | grounding predicates re-read from DataHub inside the gate | `authorization.py` |
 
 That last row exists because of a bug this project found in its own trace. Severity
 answered *how much* the agent may do and never *to what* — so a run quietly tagged a
@@ -138,6 +178,12 @@ And three integrity properties that follow from it:
 - **Write-backs are verified.** Every successful mutation re-reads the entity from DataHub
   and shows the tag or note present, rather than reporting a bare `success: true`. The card
   write-back does the same.
+
+- **A read of the graph outranks the model's checklist.** If the agent reports a field as
+  the root cause and DataHub says that field isn't there, the proof comes back `DENY` and
+  the write is blocked even at a tier that would otherwise permit it. Being *unable* to
+  read, though, never denies and never revokes: an absence you couldn't confirm is not
+  evidence of absence — the same rule `mirror_audit` and `revalidate` already follow.
 
 The severity gate covers *acting on the data*. It deliberately never covers *recording
 what was learned* — the lower the confidence, the more valuable the record.
@@ -176,6 +222,13 @@ That Do Real Work").
 
 ## Architecture
 
+- `src/incident_copilot/authorization.py` — the authorization proof: predicates grounded
+  in DataHub aspects, a content-addressed id, and `recheck_authorization`, which the gate
+  calls at write time so a permission can be revoked rather than merely granted
+- `verify_authorization.py` — recomputes every stored authorization from the grounds
+  recorded on its own card, so the determinism claim is a command rather than a promise
+- `counterfactual.py` — the whole arc against a live instance: issue, write, remove the
+  field, re-check, refuse, restore
 - `src/incident_copilot/memory.py` — the Investigation Card: model, markdown+JSON
   rendering, exact parse-back, the Python-driven `recall_prior_investigations` tool and the
   ungated `write_investigation_card` tool
@@ -208,20 +261,46 @@ That Do Real Work").
   investigation history, interactive lineage graph, entity explorer, status
 - `examples/` — unedited recorded investigation output
 
-**86 tests, no live DataHub needed** — `python tests/test_<name>.py`, each exits non-zero
+**158 tests, no live DataHub needed** — `python tests/test_<name>.py`, each exits non-zero
 on failure:
 
 | Suite | Covers |
 |---|---|
+| `test_authorization_proof.py` (45) | insufficient evidence denies, sufficient allows, an authorized write lands, a **changed predicate revokes** and the identical write is then refused, revocation stays scoped to the entity whose grounds moved, unreadable never revokes, and the id is reproducible from the card alone while a tampered one fails |
 | `test_write_back_gate.py` (19) | what the gate blocks and permits, and that a refusal returns in the shape LangChain demands rather than crashing the run |
 | `test_report_findings_drift.py` (10) | when the schema-drift audit runs, when it cleanly stays off, and that a malformed tool response can't crash the mandatory checkpoint |
-| `test_panel_snapshot.py` (37) | that a blocked mutation reaches the UI, and that nothing is invented before the policy layer has run |
+| `test_panel_snapshot.py` (45) | that a blocked mutation and a revoked authorization both reach the UI, and that nothing is invented before the policy layer has run |
 | `test_prior_knowledge_revalidation.py` (20) | that stale memory is withdrawn, that unverifiable memory is *not*, and that a withdrawal really does block the write-back |
 | `test_web_bundle.py` (18) | that the shipped UI actually parses — a JS syntax error blanks every view at once while the server still answers 200 |
 
 Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure OpenAI. Those
 are implementation choices; the thing being built is the trust and memory layer around
 them.
+
+## Scope, stated honestly
+
+What this does not do, so nobody has to find out by being disappointed:
+
+- **Revocation covers schema predicates only.** A grounding predicate is "field X is
+  present/absent on URN Y", re-read from `schemaMetadata`. Ownership changes, tag changes,
+  deprecation and lineage rewiring are *not* currently grounds, so they cannot revoke an
+  authorization. The mechanism generalizes to any re-readable predicate; only these are
+  implemented and tested.
+- **It is not a claim verifier.** It does not adjudicate whether the agent's prose is true.
+  `revalidate.py` does a narrow version of that — enough to decide which stored evidence
+  may still count — and no more. If you want rigorous verification of what an agent
+  asserted about a catalog, that is a different and worthwhile problem.
+- **The policy is code, not configuration.** Tiers, thresholds and the target rules live in
+  `decision.py` / `mcp_client.py`. There is no policy DSL and nothing is operator-editable
+  without a code change. That was a deliberate trade for reviewability at this size.
+- **One incident domain, three seeded scenarios.** The agent chooses its own path and
+  reaches genuinely different conclusions across runs, but it is pointed at a data-quality
+  incident on one datapack, not at arbitrary catalog work.
+- **MCP reads are taken at face value.** The agent reads DataHub exclusively through the
+  official MCP server and does not independently cross-check those reads against GraphQL.
+  If the transport misreports a schema, the proof inherits that error.
+- **The demo runs on a single VM** with a cron watchdog for a recurring OpenSearch failure.
+  It is a demo, not an SLA.
 
 ## Contributed back upstream
 
