@@ -438,6 +438,39 @@ h3 { font-size: 12px; font-weight: 600; margin: 0 0 10px;
 .stage-applied  { color: var(--warn);   background: rgba(210,153,34,.12); }
 .stage-verified { color: var(--ok);     background: rgba(63,185,80,.12); }
 
+/* Authorization proof.
+   A predicate is the unit a reader can check, so it gets the visual weight of a
+   row rather than a bullet: its id on the left (referenced verbatim in the
+   revocation message), its claim and DataHub grounding on the right. `flipped` is
+   the one state worth interrupting the page for -- it is the moment the permission
+   stopped existing. */
+.predicate {
+  display: flex; gap: 9px;
+  padding: 7px 0; font-size: 12.5px;
+  border-top: 1px solid var(--border);
+}
+.predicate:first-of-type { border-top: 0; }
+.predicate-id {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  color: var(--dim); min-width: 22px; padding-top: 1px;
+}
+.predicate-body { flex: 1; }
+.predicate.holds > .predicate-body > b { color: var(--ok); }
+.predicate.fails > .predicate-body > b { color: var(--danger); }
+.predicate.fails { color: var(--muted); }
+.predicate-src {
+  display: block; margin-top: 3px;
+  font-size: 11px; color: var(--dim); line-height: 1.5;
+}
+.predicate.flipped {
+  background: rgba(248,81,73,.06);
+  border-radius: var(--r-sm);
+  padding-left: 8px; padding-right: 8px;
+  margin: 2px -8px;
+}
+.predicate.flipped .predicate-id { color: var(--danger); }
+.panel-block.is-revoked { border-color: rgba(248,81,73,.45); }
+
 .mirror-row {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 0; font-size: 12px;

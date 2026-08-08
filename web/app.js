@@ -529,6 +529,63 @@ function panelHtml(s) {
         </div>`).join('') || '<p class="sub" style="font-size:12px">No mirrors found.</p>'}
     </div>`;
 
+  /* The authorization proof: what permitted this write, and whether it still does.
+   *
+   * Rendered as two states rather than one, because the interesting event is the
+   * difference between them. `auth` is the proof as issued -- the predicates, where
+   * each was observed in DataHub, and the exact entities they cover. `auth.recheck`
+   * only exists once a mutation has been attempted, and is the same proof re-read at
+   * that moment. When a predicate flipped in between, this is where it shows: same
+   * authorization id, a named predicate that stopped holding, and a shorter target
+   * list. Nothing here is computed in the browser; both objects come off the same
+   * state dict the gate itself consulted. */
+  const auth = s.authorization;
+  const authBlock = !auth ? '' : (() => {
+    const rc = auth.recheck;
+    const revoked = rc && rc.revoked_targets.length;
+    const verdict = revoked ? 'REVOKED' : auth.decision;
+    const chip = verdict === 'ALLOW' ? 'chip-ok' : 'chip-danger';
+
+    const predicates = (rc ? rc.predicates : auth.predicates).map((p) => {
+      const flipped = p.recheck === 'flipped';
+      return `
+        <div class="predicate ${p.holds ? 'holds' : 'fails'} ${flipped ? 'flipped' : ''}">
+          <span class="predicate-id">${h(p.id)}</span>
+          <span class="predicate-body">
+            <b>${p.holds ? '✓' : '✗'}</b> ${h(p.statement)}
+            ${p.live ? `<span class="predicate-src">${h(p.aspect)} · ${h(p.source_tool)} ·
+              <span class="urn">${h(urnTail(p.urn))}</span> → observed
+              <b class="mono">${h(p.observed)}</b>${p.observed_now && p.observed_now !== p.observed
+                ? ` → now <b class="mono">${h(p.observed_now)}</b>` : ''}</span>` : ''}
+            ${p.recheck === 'unverifiable'
+              ? '<span class="predicate-src">could not be re-read — prior verdict stands</span>' : ''}
+          </span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="panel-block ${revoked ? 'is-revoked' : ''}">
+        <div class="lock-head">
+          <h3 style="margin:0">Authorization</h3>
+          <span class="chip ${chip}">${h(verdict)}</span>
+        </div>
+        <p class="sub" style="font-size:11.5px;margin:6px 0 10px">
+          <b class="mono">${h(auth.id)}</b> · ${h(auth.policy_version)}
+          <br><span style="opacity:.75">id is a hash of the grounds below — recompute it with
+          <b class="mono">verify_authorization.py</b></span>
+        </p>
+        ${predicates}
+        ${revoked ? `
+          <div class="error-box" style="margin-top:10px">
+            <b>Revoked at write time.</b> ${h(rc.revoked_by.join(', '))} stopped holding in
+            DataHub after this authorization was issued, so
+            ${rc.revoked_targets.map((t) => `<span class="urn">${h(urnTail(t))}</span>`).join(', ')}
+            left authorized scope. The agent was not re-asked; the evidence changed, so the
+            authority changed.
+          </div>` : ''}
+      </div>`;
+  })();
+
   const wb = s.write_back;
   const events = (wb.events || []).map((ev) => `
     <div class="event">
@@ -564,6 +621,8 @@ function panelHtml(s) {
         criticality=${h(s.blast_radius.criticality || '—')}, stale mirrors=${drift ? drift.stale.length : 0})
         = <b>${h(wb.severity || '—')}</b></div>` : ''}
     </div>
+
+    ${authBlock}
 
     <div class="panel-block ${wb.locked ? 'is-locked' : 'is-open'}">
       <div class="lock-head">
@@ -842,6 +901,29 @@ async function viewInvestigation(incidentId) {
         <p class="sub" style="font-size:13px">This run inherited <b>${c.reused_checks}</b> confirmed
         check(s) from <a href="#/investigation/${h(c.continues_incident_id)}" style="color:var(--accent)">${h(c.continues_incident_id)}</a>
         instead of re-deriving them.</p>
+      </div>` : ''}
+
+    ${c.authorization_id ? `
+      <div style="height:14px"></div>
+      <div class="card">
+        <div class="lock-head">
+          <h3 style="margin:0">Authorization</h3>
+          <span class="chip ${c.authorization_decision === 'ALLOW' ? 'chip-ok' : 'chip-danger'}">${h(c.authorization_decision)}</span>
+        </div>
+        <p class="sub" style="font-size:12.5px;margin:8px 0 4px">
+          <b class="mono">${h(c.authorization_id)}</b>
+          <br><span class="urn">${h(c.authorization_hash)}</span>
+        </p>
+        <p class="sub" style="font-size:11.5px;margin-bottom:10px">This id is a hash of the grounds
+          below, stored on the card itself — <b class="mono">python verify_authorization.py</b>
+          recomputes it from the record without trusting this page.</p>
+        ${c.authorization_predicates.map((p) => `<div class="predicate holds"><span class="predicate-body">${h(p)}</span></div>`).join('')}
+        ${c.authorization_revoked_targets.length ? `
+          <div class="error-box" style="margin-top:10px">
+            <b>Revoked before the write landed.</b> These left authorized scope because a grounding
+            predicate stopped holding between the authorization being issued and the mutation being
+            attempted:<br>${c.authorization_revoked_targets.map((t) => `<span class="urn">${h(t)}</span>`).join('<br>')}
+          </div>` : ''}
       </div>` : ''}
 
     ${c.schema_drift_mirrors_checked ? `

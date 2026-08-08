@@ -16,6 +16,7 @@ worth anything if two things hold, so both are asserted here:
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -251,6 +252,64 @@ async def main():
         "...and broken down by tool",
         snap["datahub_calls"]["by_tool"] == [{"tool": "get_lineage", "count": 2}],
     )
+
+    # ---- the authorization proof reaches the UI, both as issued and as ruled --
+    # The panel renders these two objects side by side; if the snapshot ever stopped
+    # carrying one of them the revocation would silently disappear from the screen
+    # while still happening in the gate, which is the exact class of divergence this
+    # module exists to prevent.
+    check("no authorization reported before the policy layer runs", snapshot({})["authorization"] is None)
+
+    from incident_copilot.authorization import issue_authorization, recheck_authorization
+
+    class _Schema:
+        name = "list_schema_fields"
+
+        def __init__(self):
+            self.has = True
+
+        async def coroutine(self, urn, keywords, limit, offset):
+            return (json.dumps({"fields": [{"fieldPath": "f"}] if self.has else []}), None)
+
+    class _F:
+        outcome = "root_cause_found"
+        changed_field_path = "f"
+        inherited_evidence: list = []
+        evidence_recent_schema_change = True
+        evidence_field_matches_symptom = True
+        evidence_lineage_confirms_path = True
+        evidence_downstream_confirmed = True
+        continues_incident_id = None
+        root_cause_summary = "s"
+        affected_dataset_count = 1
+        affected_dashboard_count = 0
+        platforms_affected: list = []
+        business_criticality = "medium"
+
+    schema = _Schema()
+    st = {
+        "severity": "tag_and_note",
+        "root_cause_urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,x,PROD)",
+        "confidence_level": "high",
+        "checks_confirmed": 4,
+        "checks_total": 4,
+        "findings": _F(),
+    }
+    st["authorization"] = await issue_authorization(st, schema, None)
+    auth = snapshot(st)["authorization"]
+    check("the panel carries the authorization id", auth["id"].startswith("AUTH-"))
+    check("...its decision", auth["decision"] == "ALLOW")
+    check("...and the grounds, with the aspect each was observed on", any(
+        p["live"] and p["aspect"] == "schemaMetadata" for p in auth["predicates"]
+    ))
+    check("no recheck until a write is attempted", auth["recheck"] is None)
+
+    schema.has = False
+    st["authorization_recheck"] = await recheck_authorization(st["authorization"], schema)
+    auth = snapshot(st)["authorization"]
+    check("a revocation reaches the panel", auth["recheck"]["revoked_targets"] == [st["root_cause_urn"]])
+    check("...naming the predicate that flipped", auth["recheck"]["revoked_by"] != [])
+    check("...while the issued proof stays visible for comparison", auth["decision"] == "ALLOW")
 
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
