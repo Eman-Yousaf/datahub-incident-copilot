@@ -223,6 +223,35 @@ Under the hood: DataHub OSS + its MCP server, a LangGraph ReAct loop, Azure Open
 are implementation choices; the thing being built is the trust and memory layer around
 them.
 
+## Contributed back upstream
+
+Both of these are real bugs this project hit while building against the official MCP server,
+found by running the agent rather than reading the code. Both are **submitted, not merged.**
+
+**[acryldata/mcp-server-datahub#198](https://github.com/acryldata/mcp-server-datahub/pull/198)
+— `sort_by="relevance"` breaks every search.** The tool exposes `sort_by`, and an LLM fills
+in `"relevance"` unprompted, because asking for "the best-ranked results" is idiomatic and
+indistinguishable in intent from not sorting at all. But relevance isn't a field — it's the
+name of the default ranking — so DataHub OSS has nothing to sort on and rejects the query:
+
+```
+query_shard_exception: No mapping found for [relevance] in order to sort on
+-> search_phase_execution_exception: all_shards_failed   (HTTP 400)
+```
+
+It presents as a search-backend outage while actually being an unvalidated argument, so the
+agent correctly concluded the backend was down and refused to act — every search that run.
+The fix normalizes it to a no-op. Worked around locally in `_wrap_search_sort_compat`.
+
+**[acryldata/mcp-server-datahub#155](https://github.com/acryldata/mcp-server-datahub/pull/155)
+— `entity_type = report` looks valid and isn't.** A model resolving a BI dashboard guessed
+it, got zero results, and burned retries before recovering. PowerBI/Tableau/Looker report
+artifacts are indexed as `dataset`, and the filter docs didn't say so.
+
+Both share a root cause worth naming: an LLM caller's natural-sounding guess isn't validated
+against what the tool actually accepts. That's a category of bug MCP servers will keep
+hitting as agents become the primary callers.
+
 ## Setup
 
 Requires Docker (for DataHub's local quickstart), Python 3.11+, and an Azure OpenAI
