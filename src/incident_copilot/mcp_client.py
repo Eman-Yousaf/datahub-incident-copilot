@@ -296,26 +296,43 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
             if isinstance(kwargs.get(key), str):
                 kwargs[key] = [kwargs[key]]
 
+        # Every gate decision is recorded on the state dict, in order, so the web
+        # UI can show the real sequence -- proposed, then allowed or blocked, then
+        # applied, then verified -- instead of a hand-drawn animation of what the
+        # gate is supposed to do. A blocked attempt is the most informative event
+        # here, so it is kept rather than discarded once the model recovers.
+        def record(stage: str, **fields) -> None:
+            state.setdefault("writeback_events", []).append(
+                {"tool": mcp_tool.name, "stage": stage, **fields}
+            )
+
+        def refuse(message: str):
+            record("blocked", reason=message)
+            return _blocked(mcp_tool, message)
+
+        record(
+            "proposed",
+            entity_urns=list(kwargs.get("entity_urns") or []),
+            tag_urns=list(kwargs.get("tag_urns") or []),
+        )
+
         severity = state.get("severity")
         if severity is None:
-            return _blocked(
-                mcp_tool,
+            return refuse(
                 "Blocked: call report_findings first -- it establishes the confidence "
-                "level and authorized severity tier this tool checks.",
+                "level and authorized severity tier this tool checks."
             )
         if severity not in allowed:
-            return _blocked(
-                mcp_tool,
+            return refuse(
                 f"Blocked: severity tier '{severity}' does not authorize "
-                f"{mcp_tool.name}. {SEVERITY_INSTRUCTIONS[severity]}",
+                f"{mcp_tool.name}. {SEVERITY_INSTRUCTIONS[severity]}"
             )
         if mcp_tool.name == "add_tags":
             tag_urns = kwargs.get("tag_urns") or []
             if "urn:li:tag:incident-severity-high" in tag_urns and severity != "tag_note_escalated":
-                return _blocked(
-                    mcp_tool,
+                return refuse(
                     f"Blocked: severity tier '{severity}' does not authorize the "
-                    f"severity-high tag. {SEVERITY_INSTRUCTIONS[severity]}",
+                    f"severity-high tag. {SEVERITY_INSTRUCTIONS[severity]}"
                 )
 
         entity_urns = list(
@@ -327,14 +344,14 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
         authorized = _authorized_targets(mcp_tool.name, state)
         unauthorized = [urn for urn in entity_urns if urn not in authorized]
         if unauthorized:
-            return _blocked(
-                mcp_tool,
+            return refuse(
                 f"Blocked: {mcp_tool.name} may only touch entities this investigation "
                 f"confirmed something about. Not authorized: {', '.join(unauthorized)}. "
                 f"Authorized this run: "
-                f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}.",
+                f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}."
             )
 
+        record("allowed", entity_urns=entity_urns, severity=severity)
         result = await original_coroutine(*args, **kwargs)
         content, artifact = result if isinstance(result, tuple) else (result, None)
         text = _extract_text(content)
@@ -348,6 +365,7 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
             if detail
             else f"{mcp_tool.name} on {', '.join(entity_urns) or 'unknown entity'}"
         )
+        record("applied", entity_urns=entity_urns, detail=detail)
         if entity_urns and get_entities_tool is not None and text is not None:
             try:
                 after = await get_entities_tool.coroutine(urns=entity_urns)
@@ -356,8 +374,10 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
                 content = _with_text(
                     content, f"{text}\n[Verified in DataHub after write-back]: {after_text}"
                 )
+                record("verified", entity_urns=entity_urns)
             except Exception as exc:  # noqa: BLE001 -- verification is best-effort
                 content = _with_text(content, f"{text}\n[Verification read-back failed: {exc}]")
+                record("verify_failed", reason=str(exc))
 
         return (content, artifact) if isinstance(result, tuple) else content
 
@@ -367,8 +387,16 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
 
 @asynccontextmanager
 async def datahub_tools(incident_report: str = ""):
-    """Yields DataHub's MCP tools bound to one persistent session for the caller's
-    whole investigation.
+    """Yields `(tools, decision_state)` -- DataHub's MCP tools bound to one
+    persistent session for the caller's whole investigation, plus the live policy
+    state those tools write into.
+
+    The state dict is handed back rather than kept private so the web UI can render
+    the policy layer as it happens (see panel.py) from the very same object the
+    mutation gate reads. A UI that reconstructed confidence or severity from the
+    narration text could disagree with the gate, and the disagreement would be
+    invisible -- which is the opposite of what showing the machinery is for.
+    Callers that don't need it, like cli.py, can ignore the second element.
 
     `MultiServerMCPClient.get_tools()` opens a fresh stdio session -- and therefore a
     fresh `uvx mcp-server-datahub` subprocess -- for every single tool invocation, not
@@ -436,4 +464,4 @@ async def datahub_tools(incident_report: str = ""):
                 )
             )
 
-        yield filtered
+        yield filtered, decision_state

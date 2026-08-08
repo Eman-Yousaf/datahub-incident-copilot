@@ -70,7 +70,7 @@ SEVERITY_INSTRUCTIONS: dict[SeverityTier, str] = {
     ),
 }
 
-_EVIDENCE_LABELS = (
+EVIDENCE_LABELS = (
     ("evidence_recent_schema_change", "Recent schema change confirmed on the exact URN"),
     ("evidence_field_matches_symptom", "Changed field plausibly matches the reported symptom"),
     ("evidence_lineage_confirms_path", "Lineage path confirmed via get_lineage"),
@@ -178,7 +178,7 @@ class Findings(BaseModel):
     )
 
 
-_EVIDENCE_KEYS = frozenset(name for name, _ in _EVIDENCE_LABELS)
+_EVIDENCE_KEYS = frozenset(name for name, _ in EVIDENCE_LABELS)
 
 
 def validate_inheritance(findings: Findings, state: dict) -> list[str]:
@@ -236,7 +236,7 @@ def compute_confidence(findings: Findings) -> tuple[str, int, int]:
     An inconclusive outcome is always low confidence regardless of the checklist,
     since there's no confirmed root cause for evidence to be evidence *of*.
     """
-    checks = [getattr(findings, name) for name, _ in _EVIDENCE_LABELS]
+    checks = [getattr(findings, name) for name, _ in EVIDENCE_LABELS]
     checked, total = sum(checks), len(checks)
     if findings.outcome == "inconclusive":
         return "low", checked, total
@@ -332,7 +332,7 @@ def build_card(state: dict) -> InvestigationCard:
             confirmed=getattr(findings, name),
             inherited=name in inherited and getattr(findings, name),
         )
-        for name, label in _EVIDENCE_LABELS
+        for name, label in EVIDENCE_LABELS
     ]
 
     return InvestigationCard(
@@ -357,7 +357,7 @@ def build_card(state: dict) -> InvestigationCard:
             else ""
         ),
         required_before_retry=(
-            [REQUIRED_BEFORE_RETRY[name] for name, _ in _EVIDENCE_LABELS if not getattr(findings, name)]
+            [REQUIRED_BEFORE_RETRY[name] for name, _ in EVIDENCE_LABELS if not getattr(findings, name)]
             if decision == "REFUSAL"
             else []
         ),
@@ -437,7 +437,7 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
 
         checklist = "\n".join(
             f"{'✓' if getattr(findings, name) else '✗'} {label}"
-            for name, label in _EVIDENCE_LABELS
+            for name, label in EVIDENCE_LABELS
         )
         rejected = (
             "Inheritance claims rejected (nothing recalled backs them; the checks were "

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataHub Incident Copilot</title>
+<meta name="description" content="A trust-aware incident investigation agent for DataHub: it gathers evidence, refuses unsafe actions by policy enforced in code, and writes durable investigation knowledge back into the catalog.">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <span class="brand-text">
+        <strong>DataHub</strong>
+        <em>Incident Copilot</em>
+      </span>
+    </div>
+
+    <nav class="nav">
+      <a class="nav-item" href="#/" data-route="/">
+        <span class="nav-icon">⌘</span> Command Center
+      </a>
+
+      <p class="nav-group">Investigate</p>
+      <a class="nav-item" href="#/incidents" data-route="/incidents">
+        <span class="nav-icon">⬡</span> Incidents
+        <span class="nav-badge" id="nav-incident-count"></span>
+      </a>
+      <a class="nav-item" href="#/investigations" data-route="/investigations">
+        <span class="nav-icon">▤</span> Investigations
+        <span class="nav-badge" id="nav-investigation-count"></span>
+      </a>
+
+      <p class="nav-group">DataHub</p>
+      <a class="nav-item" href="#/entities" data-route="/entities">
+        <span class="nav-icon">⬢</span> Entities
+      </a>
+      <a class="nav-item" href="#/lineage" data-route="/lineage">
+        <span class="nav-icon">⋔</span> Lineage
+      </a>
+
+      <p class="nav-group">System</p>
+      <a class="nav-item" href="#/activity" data-route="/activity">
+        <span class="nav-icon">◷</span> Activity
+      </a>
+      <a class="nav-item" href="#/settings" data-route="/settings">
+        <span class="nav-icon">⚙</span> Settings
+      </a>
+    </nav>
+
+    <div class="sidebar-foot" id="health">
+      <div class="health-row"><span class="dot dot-idle"></span> DataHub</div>
+      <div class="health-row"><span class="dot dot-idle"></span> Agent</div>
+    </div>
+  </aside>
+
+  <main class="main" id="view">
+    <div class="loading-page"><span class="spinner"></span> Loading…</div>
+  </main>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
