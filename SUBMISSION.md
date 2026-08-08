@@ -3,10 +3,33 @@
 Source for the DataHub Agent Hackathon submission form (Track 1: "Agents That Do Real
 Work"). Kept in the repo so the text and the code never drift apart.
 
-**One sentence**: Incident Copilot is a trust-aware incident investigation agent that
-gathers evidence, refuses unsafe actions through deterministic policy, writes structured
-operational knowledge back into DataHub, and enables future investigations to continue
-instead of starting from scratch.
+**Tagline**: An LLM agent that writes to your data catalog unattended — and whose
+permission to write expires the moment the evidence behind it does.
+
+**One sentence**: Incident Copilot investigates data incidents against DataHub's real
+lineage graph, and every mutation it makes carries a deterministic authorization proof —
+the predicates it rests on, where in DataHub each was observed, and the exact URNs it
+covers — which is re-read at the instant of the write, so a permission is revoked rather
+than merely granted when the catalog moves underneath it.
+
+**The 20-second version.** The agent confirms a root cause and is authorized to tag it.
+The write lands and is read back. Then the field that grounded the authorization is
+removed from DataHub. Nobody tells the agent; it is not asked again; no model is invoked.
+The identical write is now refused, and the refusal names the predicate that stopped
+holding. `python counterfactual.py` does exactly this against a live instance, then puts
+the field back.
+
+**Why that matters.** The interesting question about an autonomous agent is not whether it
+can find the root cause — it's what happens in the gap between deciding to act and acting.
+Catalogs move. A field gets reverted, a mirror gets repaired, an upstream is rebuilt, and
+the justification quietly stops being true while the agent is still mid-run. Approval-based
+designs answer this by putting a human in front of every write. This one doesn't have a
+human, which is why the authority has to be able to expire on its own.
+
+**Don't trust the proof — recompute it.** Every stored Investigation Card carries the
+grounds its authorization id was hashed from, so `python verify_authorization.py` rebuilds
+every authorization the agent ever issued straight out of the catalog and reports whether
+the numbers were derived or decorative. A tampered proof core fails.
 
 **Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — the whole
 product runs in a browser: no CLI, no setup, no second DataHub tab. **Repo**:
@@ -28,6 +51,28 @@ appears on screen with the reason the code gave — `PROPOSED → BLOCKED`, verb
 Nothing on screen is rescaled or invented. Confidence renders as `confirmed / 4` and the
 level it maps to; there is no percentage anywhere, because the evidence checklist doesn't
 have that precision to give.
+
+## What this is not
+
+Stated up front, because several strong projects in this space use overlapping vocabulary
+for genuinely different mechanisms, and precision is worth more here than superlatives.
+
+- **It is not a claim verifier.** It does not adjudicate whether the agent's prose is true.
+  `revalidate.py` does a narrow version of that — enough to decide which stored evidence
+  may still count toward confidence — and nothing more.
+- **Revocation grounds are schema predicates only.** "Field X is present/absent on URN Y",
+  re-read from `schemaMetadata`. Ownership, tags, deprecation and lineage rewiring are not
+  currently grounds and cannot revoke an authorization. The mechanism generalizes; only
+  these are implemented and tested.
+- **Authority does not expire on a clock.** There is no TTL and no plan nonce. A permission
+  ends when a specific named predicate stops being true, and revocation is scoped to the
+  entities that predicate was grounding — a repaired mirror leaves authorized scope while a
+  root-cause finding that never depended on it stands untouched.
+- **The policy is code, not configuration.** No DSL, nothing operator-editable without a
+  code change. A deliberate trade for reviewability at this size.
+- **MCP reads are taken at face value.** The agent reads DataHub exclusively through the
+  official MCP server and does not cross-check those reads against GraphQL. If the
+  transport misreports a schema, the proof inherits the error.
 
 ## The problem
 
