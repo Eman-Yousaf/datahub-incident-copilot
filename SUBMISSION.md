@@ -8,9 +8,26 @@ gathers evidence, refuses unsafe actions through deterministic policy, writes st
 operational knowledge back into DataHub, and enables future investigations to continue
 instead of starting from scratch.
 
-**Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — try it
-directly in a browser, no setup needed. **Repo**:
+**Live demo**: https://incident-copilot-demo.centralindia.cloudapp.azure.com — the whole
+product runs in a browser: no CLI, no setup, no second DataHub tab. **Repo**:
 https://github.com/Eman-Yousaf/datahub-incident-copilot.
+
+The demo is an application, not a log viewer. A command center over the real catalog; an
+incident list; a live investigation workspace where the evidence checklist, the confidence
+arithmetic and the **write-back gate** resolve on screen as the agent works; the stored
+Investigation Cards read back out of DataHub; the real lineage graph (interactive, and every
+edge is a relationship DataHub actually traversed — none are inferred from layout); an
+entity explorer; and a live system-status page.
+
+The investigation panel reads the same `decision_state` object the mutation gate reads, not
+the narration text beside it. That distinction is the point: a panel reconstructed from what
+the model *said* could disagree with what the code *computed*, and catching exactly that
+disagreement is why the policy lives in Python. So when the gate refuses a write, the refusal
+appears on screen with the reason the code gave — `PROPOSED → BLOCKED`, verbatim.
+
+Nothing on screen is rescaled or invented. Confidence renders as `confirmed / 4` and the
+level it maps to; there is no percentage anywhere, because the evidence checklist doesn't
+have that precision to give.
 
 ## The problem
 
