@@ -121,7 +121,20 @@ async def main():
     tool4 = build_report_findings_tool(state4, FakeLineageTool(), BrokenSchemaFieldsTool())
     out4 = await tool4.coroutine(**BASE_FINDINGS, changed_field_path=FIELD, platforms_affected=["dbt"])
     expect("malformed tool response doesn't raise past report_findings", isinstance(out4, str))
-    expect("failed audit recorded as schema_drift=None, not a stale claim", state4.get("schema_drift") is None)
+    # A malformed `fields` payload used to raise out of `_field_status`, which the
+    # outer guard caught by throwing the entire audit away (schema_drift = None).
+    # `_field_status` now classifies an unusable payload as "unreadable" instead, so
+    # the audit completes and reports per-mirror what it could not read. That is
+    # strictly more informative and it preserves the property this case exists to
+    # protect: an unreadable mirror is never counted stale, so no claim is made about
+    # an entity the code could not actually inspect.
+    drift4 = state4.get("schema_drift") or {}
+    expect("malformed response yields no stale claim", drift4.get("mirrors_stale") == [])
+    expect(
+        "...and the mirrors are reported unreadable rather than silently dropped",
+        bool(drift4.get("mirrors_checked"))
+        and all(m["status"] == "unreadable" for m in drift4["mirrors_checked"]),
+    )
 
     # --- server doesn't expose the tools (older DataHub) -> clean no-op, no crash ---
     state5 = {}

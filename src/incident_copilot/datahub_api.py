@@ -343,19 +343,46 @@ async def investigation_cards(limit: int = 50) -> dict:
     if "__error" in data:
         return {"cards": [], "error": data["__error"]}
 
-    cards: list[dict] = []
+    cards = [_card_row(card, urn) for card, urn in _parse_documents(data)]
+    cards.sort(key=lambda row: row["timestamp"], reverse=True)
+    return {"cards": cards}
+
+
+def _parse_documents(data: dict) -> list[tuple[InvestigationCard, str]]:
+    """Every stored document that actually carries a card payload, decoded."""
+    out: list[tuple[InvestigationCard, str]] = []
     for result in ((data.get("searchAcrossEntities") or {}).get("searchResults") or []):
         entity = result.get("entity") or {}
         text = (((entity.get("info") or {}).get("contents") or {}).get("text")) or ""
         if CARD_MARKER not in text:
             continue
         card = parse_card(text)
-        if card is None:
-            continue
-        cards.append(_card_row(card, entity.get("urn", "")))
+        if card is not None:
+            out.append((card, entity.get("urn", "")))
+    return out
 
-    cards.sort(key=lambda row: row["timestamp"], reverse=True)
-    return {"cards": cards}
+
+async def stored_cards(limit: int = 200) -> list[tuple[InvestigationCard, str]]:
+    """The cards as `InvestigationCard` objects rather than UI rows.
+
+    `investigation_cards` flattens for display and drops anything the web app has no
+    use for. The authorization verifier needs the whole model -- specifically the
+    recorded proof core -- so it reads through here instead of re-deriving a card
+    from a row that never carried one.
+    """
+    data = await graphql(
+        """
+        query($count: Int!) {
+          searchAcrossEntities(input: {types: [DOCUMENT], query: "*", count: $count}) {
+            searchResults { entity { urn ... on Document { info { contents { text } } } } }
+          }
+        }
+        """,
+        {"count": max(limit, 1)},
+    )
+    if "__error" in data:
+        raise RuntimeError(data["__error"])
+    return _parse_documents(data)
 
 
 def _card_row(card: InvestigationCard, document_urn: str) -> dict:
@@ -400,6 +427,11 @@ def _card_row(card: InvestigationCard, document_urn: str) -> dict:
         "schema_drift_mirrors_checked": card.schema_drift_mirrors_checked,
         "schema_drift_mirrors_stale": card.schema_drift_mirrors_stale,
         "schema_drift_stale_platforms": card.schema_drift_stale_platforms,
+        "authorization_id": card.authorization_id,
+        "authorization_hash": card.authorization_hash,
+        "authorization_decision": card.authorization_decision,
+        "authorization_predicates": card.authorization_predicates,
+        "authorization_revoked_targets": card.authorization_revoked_targets,
     }
 
 

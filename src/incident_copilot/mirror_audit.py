@@ -81,11 +81,21 @@ async def _field_status(list_schema_fields_tool, mirror_urn: str, field_path: st
     except Exception:  # noqa: BLE001
         return "unreadable"
     fields = result.get("fields")
-    if fields is None:
+    if not isinstance(fields, list):
         return "unreadable"
     # keywords can match on description text, not just fieldPath -- require an exact
-    # fieldPath match, never trust "non-empty result" alone.
-    return "current" if any(f.get("fieldPath") == field_path for f in fields) else "stale"
+    # fieldPath match, never trust "non-empty result" alone. The isinstance guard is
+    # not defensive padding: a malformed `fields` entry used to raise straight out of
+    # this generator, and because the only caller was wrapped in a broad `except` the
+    # failure surfaced as "no drift found" rather than as an error. Adding the
+    # authorization proof gave this function a second caller and made the crash
+    # visible. A non-dict entry is unreadable, which -- per this module's own rule --
+    # is never counted as stale.
+    return (
+        "current"
+        if any(isinstance(f, dict) and f.get("fieldPath") == field_path for f in fields)
+        else "stale"
+    )
 
 
 async def audit_schema_drift(

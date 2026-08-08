@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from .authorization import recheck_authorization, revocation_message
 from .decision import SEVERITY_INSTRUCTIONS, build_card, build_report_findings_tool
 from .mcp_util import extract_text as _extract_text
 from .mcp_util import with_text as _with_text
@@ -276,7 +277,7 @@ def _blocked(mcp_tool, message: str):
     return message
 
 
-def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
+def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool, list_schema_fields_tool=None):
     """Wraps a mutation tool so it refuses to run until `report_findings` has
     authorized a matching severity tier, and only on the entities this investigation
     actually confirmed something about (see `_authorized_targets`) -- the enforced
@@ -284,6 +285,19 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
     by the model the way a prompt instruction alone could be. On success, also
     re-fetches the entity via get_entities so the result shows the mutation actually
     landed in DataHub, instead of asking the judge to trust a bare `success: true`.
+
+    The last check before the write is the newest and the least obvious: the
+    authorization proof issued by `report_findings` is re-verified against live
+    DataHub *here*, not reused. Everything above was decided earlier in the run, and
+    "earlier" is doing real work in a multi-turn investigation -- a proof grounded on
+    a field that has since been dropped, or a mirror that has since been fixed, is
+    describing a graph that no longer exists. Re-reading the predicates at the moment
+    of action is what makes the permission revocable rather than merely granted.
+
+    `list_schema_fields_tool` is optional so the gate keeps working unchanged when
+    there is nothing to re-read against (policy_selftest's stub harness, and any
+    deployment where the tool is unavailable). Absent it, the proof is simply not
+    re-checked -- the earlier checks all still apply.
     """
     original_coroutine = mcp_tool.coroutine
     allowed = _MUTATION_ALLOWED_SEVERITIES[mcp_tool.name]
@@ -357,6 +371,39 @@ def _gate_mutation_tool(mcp_tool, state: dict, get_entities_tool):
                 f"Authorized this run: "
                 f"{', '.join(sorted(authorized)) or 'none -- no root cause was confirmed'}."
             )
+
+        # The proof carries the authority, so a proof that does not say ALLOW blocks
+        # even when the severity tier would have permitted the call. That gap is
+        # reachable: the tier is computed from the agent's evidence checklist, while
+        # the proof's grounding predicate is a Python read of the entity's schema. If
+        # those disagree -- the model reported a field that DataHub says is not there
+        # -- the read wins.
+        proof = state.get("authorization")
+        if proof and proof.get("decision") != "ALLOW":
+            return refuse(
+                f"Blocked: authorization {proof.get('authorization_id')} is "
+                f"{proof.get('decision')}. Unestablished grounds: "
+                f"{', '.join(proof.get('failed_predicates') or []) or 'none recorded'}. "
+                f"{SEVERITY_INSTRUCTIONS.get(severity, '')}"
+            )
+
+        # Re-verify the authorization proof against DataHub as it is right now. A
+        # predicate that flipped revokes exactly the targets it was grounding, so a
+        # fixed mirror stops being writable without disturbing a root-cause finding
+        # that never depended on it.
+        if proof and list_schema_fields_tool is not None:
+            rechecked = await recheck_authorization(proof, list_schema_fields_tool)
+            state["authorization_recheck"] = rechecked
+            revoked = set(rechecked.get("revoked_targets") or ())
+            if revoked & set(entity_urns):
+                record(
+                    "revoked",
+                    entity_urns=sorted(revoked & set(entity_urns)),
+                    predicates=rechecked.get("revoked_by") or [],
+                )
+                return _blocked(
+                    mcp_tool, revocation_message(mcp_tool.name, rechecked, entity_urns)
+                )
 
         record("allowed", entity_urns=entity_urns, severity=severity)
         result = await original_coroutine(*args, **kwargs)
@@ -433,14 +480,18 @@ async def datahub_tools(incident_report: str = ""):
                 _wrap_search_sort_compat(tool)
 
         get_entities_tool = by_name.get("get_entities")
+        schema_fields_tool = by_name.get("list_schema_fields")
         for tool in filtered:
             if tool.name in _MUTATION_ALLOWED_SEVERITIES:
-                _gate_mutation_tool(tool, decision_state, get_entities_tool)
+                _gate_mutation_tool(tool, decision_state, get_entities_tool, schema_fields_tool)
             _wrap_with_provenance(tool, decision_state)
 
         filtered.append(
             build_report_findings_tool(
-                decision_state, by_name.get("get_lineage"), by_name.get("list_schema_fields")
+                decision_state,
+                by_name.get("get_lineage"),
+                schema_fields_tool,
+                _authorized_targets,
             )
         )
 

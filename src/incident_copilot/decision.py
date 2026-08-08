@@ -40,6 +40,7 @@ from .memory import (
     confirmed_evidence_sources,
     new_incident_id,
 )
+from .authorization import issue_authorization
 from .mirror_audit import audit_schema_drift
 from .revalidate import conflicted_ids, revalidate_prior_knowledge
 
@@ -352,6 +353,14 @@ def build_card(state: dict) -> InvestigationCard:
     mirrors_stale = schema_drift.get("mirrors_stale", [])
 
     decision = "REFUSAL" if severity == "no_action" else "ACTION"
+    # Identity comes from the proof as *issued*; outcome comes from the re-check the
+    # gate actually ruled on. Keeping them separate is what makes the record
+    # verifiable: `authorization_id` and `authorization_hash` are both functions of
+    # `authorization_core`, so a reader can recompute them from the card alone. Had
+    # the hash been taken from the re-check while the core stayed the issued one, the
+    # two would disagree and the verifier would report a forgery that isn't there.
+    issued = state.get("authorization") or {}
+    ruled = state.get("authorization_recheck") or issued
     evidence = [
         EvidenceItem(
             key=name,
@@ -395,6 +404,15 @@ def build_card(state: dict) -> InvestigationCard:
         reused_checks=len([name for name in inherited if getattr(findings, name, False)]),
         datahub_calls=len(state.get("datahub_calls") or []),
         dropped_inheritance=list(state.get("dropped_inheritance", [])),
+        authorization_id=issued.get("authorization_id"),
+        authorization_hash=issued.get("proof_hash"),
+        authorization_decision=ruled.get("decision", ""),
+        authorization_predicates=[
+            f"{p['id']} [{'✓' if p['holds'] else '✗'}] {p['statement']}"
+            for p in ruled.get("predicates", [])
+        ],
+        authorization_revoked_targets=list(ruled.get("revoked_targets") or []),
+        authorization_core=issued.get("core") or {},
         schema_drift_field=schema_drift.get("checked_field"),
         schema_drift_mirrors_checked=len(mirrors_checked),
         schema_drift_mirrors_stale=len(mirrors_stale),
@@ -402,7 +420,12 @@ def build_card(state: dict) -> InvestigationCard:
     )
 
 
-def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_fields_tool=None):
+def build_report_findings_tool(
+    state: dict,
+    get_lineage_tool=None,
+    list_schema_fields_tool=None,
+    authorized_targets=None,
+):
     """Returns the report_findings tool, bound to `state` (a plain dict shared with
     mcp_client.py's mutation-tool gate). Calling this tool is how the agent's
     self-reported evidence becomes the code-computed severity that gates write-back.
@@ -414,6 +437,11 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
     `list_schema_fields_tool` are the raw MCP tools `audit_schema_drift` needs; if
     either is unavailable, the audit is silently skipped rather than failing the
     mandatory checkpoint.
+
+    `authorized_targets` is mcp_client's `_authorized_targets`, injected rather than
+    imported so this module keeps its one-way dependency on the layer above it. It is
+    only read to *describe* the permitted set inside the authorization proof; the
+    enforcing call still happens in the gate, against the same function.
     """
 
     @tool(args_schema=Findings)
@@ -476,6 +504,16 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
         state["checks_total"] = total
         state["dropped_inheritance"] = dropped
 
+        # Issue the authorization proof *after* the decision, never as part of making
+        # it. Everything above already determined what may happen; this records the
+        # grounds in a form that can be recomputed by anyone and re-tested against
+        # DataHub at the moment a mutation is actually attempted (see
+        # `recheck_authorization` in the gate). A refused run gets a proof too --
+        # decision DENY, with the predicate it could not establish named.
+        state["authorization"] = await issue_authorization(
+            state, list_schema_fields_tool, authorized_targets
+        )
+
         checklist = "\n".join(
             f"{'✓' if getattr(findings, name) else '✗'} {label}"
             for name, label in EVIDENCE_LABELS
@@ -526,9 +564,24 @@ def build_report_findings_tool(state: dict, get_lineage_tool=None, list_schema_f
                 )
             )
 
+        proof = state["authorization"]
+        proof_lines = "\n".join(
+            f"  {p['id']} [{'✓' if p['holds'] else '✗'}] {p['statement']}"
+            + (f" — observed `{p['observed']}` on {p['urn']}" if p["live"] else "")
+            for p in proof["predicates"]
+        )
+        proof_block = (
+            f"Authorization {proof['authorization_id']} ({proof['policy_version']}): "
+            f"{proof['decision']}\n{proof_lines}\n"
+            "  These predicates are re-read from DataHub at the moment you attempt a "
+            "write. If one of them stops holding, the authorization is revoked and the "
+            "write is refused -- so do not treat this as a permanent permit.\n"
+        )
+
         return (
             f"{revalidation}"
             f"{rejected}"
+            f"{proof_block}"
             f"Root-cause confidence: {confidence_level.upper()} "
             f"({checked}/{total} evidence checks confirmed)\n"
             f"Evidence:\n{checklist}\n"

@@ -237,6 +237,7 @@ def snapshot(state: dict) -> dict[str, Any]:
         },
         "schema_drift": _drift(state),
         "write_back": _write_back(state),
+        "authorization": _authorization(state),
         "card_urn": state.get("card_urn"),
         "tools_used": sorted(state.get("tools_used") or ()),
         # Real DataHub API traffic, not a decorative counter: every entry is one
@@ -246,6 +247,52 @@ def snapshot(state: dict) -> dict[str, Any]:
             "by_tool": _call_breakdown(state),
         },
         "knowledge": _knowledge(state),
+    }
+
+
+def _authorization(state: dict) -> dict[str, Any] | None:
+    """The authorization proof as issued, and -- once a write has been attempted --
+    as it re-read at the moment of action.
+
+    Both are surfaced rather than only the latest, because the interesting event is
+    the *difference* between them: same authorization id, a named predicate that
+    stopped holding, and a target list that got shorter. Collapsing them to one
+    current view would hide exactly the thing worth showing.
+
+    Nothing is recomputed here. `proof` is the object the gate consulted, and
+    `recheck` is the object it consulted at write time; if the panel disagreed with
+    either, the panel would be the bug.
+    """
+    proof = state.get("authorization")
+    if not proof:
+        return None
+    recheck = state.get("authorization_recheck")
+    return {
+        "id": proof.get("authorization_id"),
+        "policy_version": proof.get("policy_version"),
+        "hash": proof.get("proof_hash"),
+        "issued_at": proof.get("issued_at"),
+        "decision": proof.get("decision"),
+        "severity": proof.get("severity"),
+        "predicates": proof.get("predicates") or [],
+        "failed_predicates": proof.get("failed_predicates") or [],
+        "evidence": proof.get("evidence") or [],
+        "authorized_targets": proof.get("authorized_targets") or {},
+        "permitted_tags": proof.get("permitted_tags") or [],
+        "recheck": (
+            {
+                "at": recheck.get("rechecked_at"),
+                "decision": recheck.get("decision"),
+                "revoked_targets": recheck.get("revoked_targets") or [],
+                "revoked_by": recheck.get("revoked_by") or [],
+                "hash": recheck.get("current_hash"),
+                "hash_changed": recheck.get("hash_changed"),
+                "predicates": recheck.get("predicates") or [],
+                "authorized_targets": recheck.get("authorized_targets") or {},
+            }
+            if recheck
+            else None
+        ),
     }
 
 

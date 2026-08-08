@@ -160,6 +160,26 @@ class InvestigationCard(BaseModel):
     # carry forward evidence it never had is exactly the thing a reader wants to see.
     dropped_inheritance: list[str] = Field(default_factory=list)
 
+    # The authorization proof this run acted (or refused to act) under. Stored on the
+    # card so the permission outlives the process that held it: a reader opening the
+    # document in DataHub months later can see which predicates were true at the time,
+    # which entities they covered, and recompute the id from the recorded core. An
+    # action whose justification is only in a log is an action nobody can audit.
+    authorization_id: str | None = None
+    authorization_hash: str | None = None
+    authorization_decision: str = ""
+    authorization_predicates: list[str] = Field(default_factory=list)
+    authorization_revoked_targets: list[str] = Field(default_factory=list)
+
+    # The exact inputs the id and hash were computed over. Stored because "the
+    # authorization is deterministic" is a claim, and a claim a reader cannot test is
+    # worth about as much as no claim: with the core on the card, anyone can recompute
+    # the id from the record itself (see verify_authorization.py) and find out whether
+    # the number was derived or decorative. It is small -- a handful of predicate
+    # tuples and the permitted target lists -- and it is the difference between
+    # showing a hash and being checkable.
+    authorization_core: dict = Field(default_factory=dict)
+
     # Cross-platform schema-drift check (mirror_audit.py). Recomputed fresh every
     # run -- never inherited via recall/validate_inheritance, so the already-hardened
     # inheritance logic above stays untouched by this feature.
@@ -293,6 +313,28 @@ def render_card(card: InvestigationCard) -> str:
                 f"Checked {card.schema_drift_mirrors_checked} same-entity mirror(s) for "
                 f"`{card.schema_drift_field}` -- all current."
             )
+        lines.append("")
+
+    if card.authorization_id:
+        lines += [
+            "## Authorization",
+            "",
+            f"**{card.authorization_id}** — decision **{card.authorization_decision}**  ",
+            f"`{card.authorization_hash}`",
+            "",
+            "Grounds evaluated at the time of action:",
+            "",
+        ]
+        lines += [f"- {p}" for p in card.authorization_predicates]
+        if card.authorization_revoked_targets:
+            lines += [
+                "",
+                "> **Revoked before the write landed.** These entities left authorized "
+                "scope because a grounding predicate stopped holding in DataHub between "
+                "the authorization being issued and the mutation being attempted:",
+                "",
+            ]
+            lines += [f"> - `{urn}`" for urn in card.authorization_revoked_targets]
         lines.append("")
 
     if card.decision == "REFUSAL":
