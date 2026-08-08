@@ -1,0 +1,4 @@
+# ops/ scripts are deployed to the Linux demo VM by scp straight from a Windows
+# checkout, and a CRLF shebang line fails there with a bare "not found" that
+# names the interpreter and gives no hint about line endings. Pin them to LF.
+*.sh text eol=lf
