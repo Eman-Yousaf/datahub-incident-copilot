@@ -261,14 +261,15 @@ That Do Real Work").
   investigation history, interactive lineage graph, entity explorer, status
 - `examples/` — unedited recorded investigation output
 
-**158 tests, no live DataHub needed** — `python tests/test_<name>.py`, each exits non-zero
+**172 tests, no live DataHub needed** — `python tests/test_<name>.py`, each exits non-zero
 on failure:
 
 | Suite | Covers |
 |---|---|
 | `test_authorization_proof.py` (45) | insufficient evidence denies, sufficient allows, an authorized write lands, a **changed predicate revokes** and the identical write is then refused, revocation stays scoped to the entity whose grounds moved, unreadable never revokes, and the id is reproducible from the card alone while a tampered one fails |
 | `test_write_back_gate.py` (19) | what the gate blocks and permits, and that a refusal returns in the shape LangChain demands rather than crashing the run |
-| `test_report_findings_drift.py` (10) | when the schema-drift audit runs, when it cleanly stays off, and that a malformed tool response can't crash the mandatory checkpoint |
+| `test_report_findings_drift.py` (11) | when the schema-drift audit runs, when it cleanly stays off, and that a malformed tool response can't crash the mandatory checkpoint |
+| `test_shipped_scripts.py` (14) | that the ops watchdog parses, probes the GraphQL resolver that actually fails rather than the RestLi one that survives, checks the public URL end to end, and repairs in the right order |
 | `test_panel_snapshot.py` (45) | that a blocked mutation and a revoked authorization both reach the UI, and that nothing is invented before the policy layer has run |
 | `test_prior_knowledge_revalidation.py` (20) | that stale memory is withdrawn, that unverifiable memory is *not*, and that a withdrawal really does block the write-back |
 | `test_web_bundle.py` (18) | that the shipped UI actually parses — a JS syntax error blanks every view at once while the server still answers 200 |
