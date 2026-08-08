@@ -369,6 +369,7 @@ def _card_row(card: InvestigationCard, document_urn: str) -> dict:
         "timestamp": card.timestamp,
         "trigger": card.trigger,
         "root_cause_urn": card.root_cause_urn,
+        "root_cause_field": card.root_cause_field,
         "root_cause_summary": card.root_cause_summary,
         "outcome": card.outcome,
         "decision": card.decision,

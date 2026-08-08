@@ -22,14 +22,23 @@ Trigger shapes (see plan milestone 2/6):
 """
 
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
 from datahub.metadata.schema_classes import (
     AuditStampClass,
+    DocumentContentsClass,
+    DocumentInfoClass,
+    DocumentSourceClass,
+    DocumentSourceTypeClass,
+    DocumentStateClass,
+    DocumentStatusClass,
+    RelatedAssetClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
     SchemaMetadataClass,
@@ -98,6 +107,145 @@ OVERLAYS = [
         ),
     },
 ]
+
+
+# Two Investigation Cards from "previous weeks", seeded for the same reason the schema
+# overlays above are: the datapack has no incident history of its own, and a memory
+# layer with nothing in it demonstrates nothing. On a freshly reseeded instance every
+# stored card is wiped, so without these the first run a judge triggers reports "no
+# prior investigation" -- and the revalidation logic, which is the point of the whole
+# memory design, has nothing to act on.
+#
+# What is seeded is *history*, never a verdict. Both cards are ordinary records; the
+# agent still recalls them by the same arithmetic relevance scoring as any other card,
+# and still re-tests each one against live DataHub itself (see revalidate.py). The
+# verdicts below are what that check genuinely returns, not values written here:
+#
+#   CONFIRMED  `order_status_detail` really is on the dbt model (the clean-one-hop
+#              overlay puts it there), so this card's finding still holds and its
+#              confirmed checks are allowed to back inheritance.
+#   CONFLICT   `order_status_code_v1` really is absent -- a column the story says was
+#              reverted. The claim fails its re-check, the card is withdrawn as
+#              evidence, and anything resting on it falls back to unconfirmed.
+#
+# Together they put all three memory behaviours in one run: inherit, confirm, reject.
+ORDER_DETAILS_DBT = (
+    "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.ORDER_ENTRY_DB.analytics.order_details,PROD)"
+)
+
+SEEDED_CARDS = [
+    {
+        "incident_id": "INC-20260806-091500",
+        "timestamp": "2026-08-06T09:15:00+00:00",
+        "trigger": (
+            "Order count on the operations dashboards looks wrong -- backordered orders "
+            "appear to be undercounted"
+        ),
+        "root_cause_urn": ORDER_DETAILS_DBT,
+        # Present in the graph (seeded by the clean-one-hop overlay) -> re-check confirms.
+        "root_cause_field": "order_status_detail",
+        "root_cause_summary": (
+            "A new order_status_detail field was added to the dbt order_details model to "
+            "carry the Backordered sub-status. Lineage confirmed the path to the reporting "
+            "layer and the downstream blast radius was measured."
+        ),
+        "confirmed_keys": [
+            "evidence_lineage_confirms_path",
+            "evidence_downstream_confirmed",
+        ],
+        "decision": "ACTION",
+        "severity": "tag_and_note",
+    },
+    {
+        "incident_id": "INC-20260807-143000",
+        "timestamp": "2026-08-07T14:30:00+00:00",
+        "trigger": (
+            "Order counts on the finance dashboards are wrong -- backordered orders "
+            "undercounted after a status schema change"
+        ),
+        "root_cause_urn": ORDER_DETAILS_DBT,
+        # Deliberately NOT in the graph -> the re-check finds the claim no longer holds.
+        "root_cause_field": "order_status_code_v1",
+        "root_cause_summary": (
+            "Traced the undercount to an order_status_code_v1 column on the dbt "
+            "order_details model, which encoded the legacy 1/2/3 status codes the "
+            "reporting layer filtered on."
+        ),
+        "confirmed_keys": [
+            "evidence_recent_schema_change",
+            "evidence_field_matches_symptom",
+        ],
+        "decision": "ACTION",
+        "severity": "tag_and_note",
+    },
+]
+
+
+def seed_investigation_cards(graph: DataHubGraph) -> None:
+    """Write the prior Investigation Cards into DataHub as `document` entities.
+
+    Rendered through the project's own `memory.render_card` rather than hand-written
+    markdown, so a seeded card is structurally identical to one the agent writes and
+    `parse_card` reads it back the same way. Hand-rolling the payload here would let
+    the seeded history drift from the real format the moment the card schema changed.
+
+    Deterministic URNs make this idempotent: re-running the seeder overwrites the same
+    two documents instead of accumulating duplicates every time.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+    from incident_copilot.decision import EVIDENCE_LABELS
+    from incident_copilot.memory import (
+        DOCUMENT_TYPE,
+        EvidenceItem,
+        InvestigationCard,
+        card_title,
+        render_card,
+    )
+
+    for spec in SEEDED_CARDS:
+        confirmed = set(spec["confirmed_keys"])
+        card = InvestigationCard(
+            incident_id=spec["incident_id"],
+            timestamp=spec["timestamp"],
+            trigger=spec["trigger"],
+            root_cause_urn=spec["root_cause_urn"],
+            root_cause_field=spec["root_cause_field"],
+            root_cause_summary=spec["root_cause_summary"],
+            outcome="root_cause_found",
+            evidence=[
+                EvidenceItem(key=key, label=label, confirmed=key in confirmed)
+                for key, label in EVIDENCE_LABELS
+            ],
+            confidence_level="medium",
+            checks_confirmed=len(confirmed),
+            checks_total=len(EVIDENCE_LABELS),
+            severity=spec["severity"],
+            decision=spec["decision"],
+            provenance=["get_entities", "get_lineage", "list_schema_fields", "search"],
+            actions_taken=[f"add_tags(urn:li:tag:incident-flagged) on {spec['root_cause_urn']}"],
+        )
+
+        urn = f"urn:li:document:seeded-{spec['incident_id'].lower()}"
+        stamp = AuditStampClass(
+            time=int(datetime.fromisoformat(spec["timestamp"]).timestamp() * 1000),
+            actor=ACTOR,
+        )
+        graph.emit(
+            MetadataChangeProposalWrapper(
+                entityUrn=urn,
+                aspect=DocumentInfoClass(
+                    title=card_title(card),
+                    status=DocumentStatusClass(state=DocumentStateClass.PUBLISHED),
+                    contents=DocumentContentsClass(text=render_card(card)),
+                    source=DocumentSourceClass(sourceType=DocumentSourceTypeClass.NATIVE),
+                    relatedAssets=[RelatedAssetClass(asset=spec["root_cause_urn"])],
+                    created=stamp,
+                    lastModified=stamp,
+                    customProperties={"documentType": DOCUMENT_TYPE},
+                ),
+            )
+        )
+        print(f"  seeded prior investigation {spec['incident_id']} -> {urn}")
 
 
 def load_datapack() -> None:
@@ -287,6 +435,16 @@ def main() -> None:
         if not _has_field(graph, overlay["urn"], overlay["field_path"]):
             print(f"[{overlay['name']}] lost after final settle, re-applying")
             apply_overlay(graph, overlay)
+
+    # Seeded last, and deliberately after the overlay re-check: one card's claim is
+    # only CONFIRMED because `order_status_detail` is really on the model, so the
+    # field has to be settled before the history that references it goes in.
+    seed_investigation_cards(graph)
+    print(
+        "\nSeeded prior investigations reference "
+        f"`{SEEDED_CARDS[0]['root_cause_field']}` (present -> re-check confirms) and "
+        f"`{SEEDED_CARDS[1]['root_cause_field']}` (absent -> re-check conflicts)."
+    )
 
 
 if __name__ == "__main__":
